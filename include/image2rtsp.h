@@ -27,6 +27,7 @@ namespace image2rtsp {
             std::map<std::string, ros::Subscriber> subs;
             std::map<std::string, GstAppSrc*> appsrc;
             std::map<std::string, int> num_of_clients;
+            std::string stream_mountpoint(XmlRpc::XmlRpcValue& stream, const std::string& name);
             std::string build_encoder(XmlRpc::XmlRpcValue& stream, const std::string& bitrate);
             GstCaps* gst_caps_new_from_image(const sensor_msgs::Image::ConstPtr &msg);
             void imageCallback(const sensor_msgs::Image::ConstPtr& msg, const std::string& topic);

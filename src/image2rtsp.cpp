@@ -19,7 +19,7 @@ using namespace image2rtsp;
 
 
 void Image2RTSPNodelet::onInit() {
-    string pipeline, mountpoint, bitrate, caps;
+    string pipeline, mountpoint, bitrate;
     // Common tail shared by every stream. h264parse + config-interval makes the
     // encoded SPS/PPS available to clients that connect mid-stream (shared factory).
     string pipeline_tail = " ! h264parse ! rtph264pay name=pay0 pt=96 config-interval=1 )";
@@ -49,9 +49,11 @@ void Image2RTSPNodelet::onInit() {
         XmlRpc::XmlRpcValue stream = streams[it->first];
         ROS_DEBUG_STREAM("Found stream: " << (std::string)(it->first) << " ==> " << stream);
 
-        // Convert to string for ease of use
-        mountpoint = static_cast<std::string>(stream["mountpoint"]);
-        bitrate = std::to_string(static_cast<int>(stream["bitrate"]));
+        // mountpoint: RTSP path. Defaults to "/<stream name>" when omitted.
+        mountpoint = stream_mountpoint(stream, it->first);
+
+        // bitrate: H.264 target in kbit/s. Defaults to 500 when omitted.
+        bitrate = std::to_string(stream.hasMember("bitrate") ? static_cast<int>(stream["bitrate"]) : 500);
 
         // Pick the H.264 encoder: software x264 (default), NVIDIA nvenc, or a custom override.
         std::string encoder = build_encoder(stream, bitrate);
@@ -70,10 +72,16 @@ void Image2RTSPNodelet::onInit() {
             * so we know to stop subscribing when no-one is connected. */
             num_of_clients[mountpoint] = 0;
             appsrc[mountpoint] = NULL;
-            caps = static_cast<std::string>(stream["caps"]);
+
+            /* Optional 'caps': when set, rescale / cap the framerate before encoding.
+             * When omitted, serve the topic at its native resolution - the caps are
+             * taken from the incoming sensor_msgs/Image itself. */
+            std::string scale = "";
+            if (stream.hasMember("caps"))
+                scale = "videoscale ! " + static_cast<std::string>(stream["caps"]) + " ! ";
 
             // Setup the full pipeline
-            pipeline = "( appsrc name=imagesrc do-timestamp=true min-latency=0 max-latency=0 max-bytes=1000 is-live=true ! videoconvert ! videoscale ! " + caps + " ! " + encoder + pipeline_tail;
+            pipeline = "( appsrc name=imagesrc do-timestamp=true min-latency=0 max-latency=0 max-bytes=1000 is-live=true ! videoconvert ! " + scale + encoder + pipeline_tail;
 
             // Add the pipeline to the rtsp server
             rtsp_server_add_url(mountpoint.c_str(), pipeline.c_str(), (GstElement **)&(appsrc[mountpoint]));
@@ -86,6 +94,15 @@ void Image2RTSPNodelet::onInit() {
         NODELET_INFO("Stream available at rtsp://%s:%s%s", server_address, port.c_str(), mountpoint.c_str());
         g_free(server_address);
     }
+}
+
+/* RTSP mount point for a stream. Defaults to "/<stream name>" when the stream
+ * omits the 'mountpoint' parameter. Used by onInit() and the client connect/
+ * disconnect handlers so they all agree on the same path. */
+std::string Image2RTSPNodelet::stream_mountpoint(XmlRpc::XmlRpcValue& stream, const std::string& name) {
+    if (stream.hasMember("mountpoint"))
+        return static_cast<std::string>(stream["mountpoint"]);
+    return "/" + name;
 }
 
 /* Build the GStreamer encoder fragment for a stream (encoder element through the
@@ -203,7 +220,7 @@ void Image2RTSPNodelet::url_connected(string url) {
     {
         XmlRpc::XmlRpcValue stream = streams[it->first];
         type = static_cast<std::string>(stream["type"]);
-        mountpoint = static_cast<std::string>(stream["mountpoint"]);
+        mountpoint = stream_mountpoint(stream, it->first);
         source = static_cast<std::string>(stream["source"]);
 
         // Check which stream the client has connected to
@@ -233,7 +250,7 @@ void Image2RTSPNodelet::url_disconnected(string url) {
     for(XmlRpc::XmlRpcValue::ValueStruct::const_iterator it = streams.begin(); it != streams.end(); ++it)
     {
         XmlRpc::XmlRpcValue stream = streams[it->first];
-        mountpoint = static_cast<std::string>(stream["mountpoint"]);
+        mountpoint = stream_mountpoint(stream, it->first);
 
         // Check which stream the client has disconnected from
         if (url==mountpoint) {

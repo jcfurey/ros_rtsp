@@ -72,8 +72,8 @@ pipelines are tuned for zero-latency encoding and no buffering.
 │         │        (thread-safe GstAppSrc)                                   │
 │         ▼                                                                   │
 │   ┌───────────────── GStreamer pipeline (per stream) ─────────────────┐    │
-│   │ appsrc ─► videoconvert ─► videoscale ─► caps ─► ENCODER ─► h264parse   │
-│   │        (or v4l2src ... for a `cam` stream)          │        │         │
+│   │ appsrc ─► videoconvert ─►[videoscale ─► caps]─► ENCODER ─► h264parse   │
+│   │        (or v4l2src ... for a `cam` stream)  ^optional      │        │  │
 │   │                                                     ▼        ▼         │
 │   │                                          x264enc / nvh264enc  rtph264pay (pay0) │
 │   └────────────────────────────────────────────────────────────────────┘    │
@@ -115,8 +115,8 @@ imageCallback(msg, topic)
       ▼
 gst_app_src_push_buffer(appsrc)
       ▼
-appsrc ! videoconvert ! videoscale ! <caps> ! <encoder> ! h264parse ! rtph264pay
-      ▼
+appsrc ! videoconvert ! [videoscale ! <caps> !] <encoder> ! h264parse ! rtph264pay
+      ▼                    ^ only when the stream sets `caps`; omitted = native resolution
 RTP over UDP to the client
 ```
 
@@ -352,18 +352,27 @@ launch file (`config/stream_setup.yaml`).
 | Key | Applies to | Required | Meaning |
 | --- | ---------- | -------- | ------- |
 | `type` | all | ✅ | `topic` or `cam`. |
-| `mountpoint` | all | ✅ | RTSP path, e.g. `/front` → `rtsp://host:8554/front`. |
-| `bitrate` | all | ✅ | Target H.264 bitrate in **kbit/sec** (for `x264`/`nvenc`). |
-| `source` | `topic` / `cam` | ✅ | `topic`: the `sensor_msgs/Image` topic. `cam`: a GStreamer source string ending in raw video. |
-| `caps` | `topic` | ✅ | Caps applied after `videoconvert ! videoscale`, before the encoder. |
+| `source` | all | ✅ | `topic`: the `sensor_msgs/Image` topic. `cam`: a GStreamer source string ending in raw video. |
+| `mountpoint` | all | ❌ (default `/<stream name>`) | RTSP path, e.g. `/front` → `rtsp://host:8554/front`. |
+| `bitrate` | all | ❌ (default `500`) | Target H.264 bitrate in **kbit/sec** (for `x264`/`nvenc`). |
+| `caps` | `topic` | ❌ (default: native resolution) | When set, inserts `videoscale ! <caps>` to rescale / cap the framerate before the encoder. Omit to serve the topic as-is. |
 | `encoder` | all | ❌ (default `x264`) | `x264` (software) or `nvenc` (NVIDIA hardware). |
 | `encoder_override` | all | ❌ | Full custom `encoder … ! caps` fragment; overrides `encoder`. |
+
+So the minimal `topic` stream is just `type` + `source`; the map key doubles as the
+default mountpoint.
 
 ### Example
 
 ```yaml
 port: "8554"
 streams:
+  # Minimal: point at a topic, take every default (served at native resolution
+  # on /backcam, x264 @ 500 kbit/s)
+  backcam:
+    type: topic
+    source: /camera/image_raw
+
   front-cam:
     type: cam
     source: "v4l2src device=/dev/video0 ! videoconvert ! videoscale ! video/x-raw,framerate=15/1,width=1280,height=720"
@@ -383,7 +392,6 @@ streams:
     type: topic
     source: /front_cam/image_raw
     mountpoint: /vaapi
-    caps: video/x-raw,framerate=15/1,width=1280,height=720
     bitrate: 1000
     encoder_override: "videoconvert ! vaapih264enc rate-control=cbr bitrate=1000 keyframe-period=30 ! video/x-h264, profile=baseline"
 ```
@@ -465,7 +473,15 @@ encoder_override: "x265enc tune=zerolatency bitrate=500 key-int-max=30 ! video/x
 
 The exact launch strings the node builds (with the example config values):
 
-**`topic` + `x264` (default)**
+**`topic` + `x264`, no `caps` (minimal — native resolution)**
+```
+( appsrc name=imagesrc do-timestamp=true min-latency=0 max-latency=0 max-bytes=1000 is-live=true
+  ! videoconvert
+  ! x264enc tune=zerolatency bitrate=500 key-int-max=30 ! video/x-h264, profile=baseline
+  ! h264parse ! rtph264pay name=pay0 pt=96 config-interval=1 )
+```
+
+**`topic` + `x264` with `caps` (rescale / cap framerate)**
 ```
 ( appsrc name=imagesrc do-timestamp=true min-latency=0 max-latency=0 max-bytes=1000 is-live=true
   ! videoconvert ! videoscale ! video/x-raw,framerate=10/1,width=640,height=480
@@ -473,7 +489,7 @@ The exact launch strings the node builds (with the example config values):
   ! h264parse ! rtph264pay name=pay0 pt=96 config-interval=1 )
 ```
 
-**`topic` + `nvenc`**
+**`topic` + `nvenc` with `caps`**
 ```
 ( appsrc name=imagesrc do-timestamp=true min-latency=0 max-latency=0 max-bytes=1000 is-live=true
   ! videoconvert ! videoscale ! video/x-raw,framerate=10/1,width=640,height=480
@@ -742,9 +758,9 @@ GST_DEBUG=3 roslaunch ros_rtsp rtsp_streams.launch
 ## 16. Known limitations
 
 - **Fixed appsrc framerate.** `gst_caps_new_from_image()` always advertises
-  `framerate=10/1` on the `appsrc` caps regardless of the actual publish rate. The
-  pipeline's `caps` filter also pins a framerate. If your publisher runs at a very
-  different rate you may want to make this configurable (see section 15).
+  `framerate=10/1` on the `appsrc` caps regardless of the actual publish rate (buffers
+  are still timestamped by arrival via `do-timestamp=true`). Set a stream's `caps` with
+  an explicit `framerate=` to override it, or make the default configurable (section 15).
 - **H.264 only in the built-in tail.** The shared tail hardcodes
   `h264parse ! rtph264pay`. Non-H.264 encoders via `encoder_override` require a
   matching code change to the tail.

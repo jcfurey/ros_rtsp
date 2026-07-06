@@ -2,23 +2,32 @@
 port: "8554"
 streams: # Cannot rename - must leave this as is.
 
-  stream-x:
-    type: cam
-    source: "v4l2src device=/dev/video0 ! videoconvert ! videoscale ! video/x-raw,framerate=15/1,width=1280,height=720"
-    mountpoint: /front
-    bitrate: 500
-    # encoder: choose the H.264 encoder (optional, default: x264)
-    #   x264  -> software encoding, works everywhere, no GPU required
-    #   nvenc -> NVIDIA hardware encoding (needs the NVIDIA driver + gstreamer1.0-plugins-bad)
-    encoder: x264
+  # Minimal: point at a ROS Image topic and serve it as an encoded RTSP stream.
+  # Only 'type' and 'source' are required. Everything else has a sensible default:
+  #   mountpoint -> "/<stream name>"   (here: /backcam)
+  #   bitrate    -> 500 kbit/s
+  #   encoder    -> x264 (software)
+  #   caps       -> none: the topic is served at its native resolution
+  backcam:
+    type: topic
+    source: /camera/image_raw
+    #                       -> rtsp://<server_ip>:8554/backcam
 
-  stream-yay:
+  # Same thing with every optional knob spelled out.
+  frontcam:
     type: topic
     source: /usb_cam1/image_raw
-    mountpoint: /back
-    caps: video/x-raw,framerate=10/1,width=640,height=480
+    mountpoint: /front      # RTSP path (default: /<stream name>)
+    bitrate: 800            # H.264 target, kbit/s (default: 500)
+    encoder: x264           # x264 (default, software) or nvenc (NVIDIA GPU)
+    caps: video/x-raw,framerate=10/1,width=640,height=480  # optional: rescale / cap framerate
+
+  # A non-ROS GStreamer source (e.g. a v4l2 camera) encoded and served directly.
+  usbcam:
+    type: cam
+    source: "v4l2src device=/dev/video0 ! videoconvert ! videoscale ! video/x-raw,framerate=15/1,width=1280,height=720"
+    mountpoint: /usb
     bitrate: 500
-    encoder: x264   # change to 'nvenc' to offload H.264 encoding to an NVIDIA GPU
 
   # Advanced: for any other hardware encoder (Intel/AMD VA-API, Jetson, ...) set
   # 'encoder_override' to the full encoder + output caps fragment. It is used
