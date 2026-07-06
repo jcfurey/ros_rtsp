@@ -47,5 +47,8 @@ Notes:
   existing master instead. Verify NVENC inside the container with
   `gst-inspect-1.0 nvh264enc`.
 
-> The Dockerfile is a tested-by-inspection reference (it was not built inside the
-> authoring environment). Adjust the base image/tags to your platform as needed.
+> Verified: the package was compiled and run end-to-end on `ros:noetic-ros-base`
+> (GStreamer 1.16.3) — `catkin_make` builds `libimage_to_rtsp_nodelet.so`, the
+> nodelet loads, and an RTSP client pulls and decodes H.264 frames from the
+> `example.launch` test stream. The `rosdep`/`apt` lines in the Dockerfile are the
+> standard resolution path; adjust base image/tags to your platform as needed.
