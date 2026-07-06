@@ -4,6 +4,11 @@ Should provide a real-time video feed (or as close as possible).
 
 Runs on Ubuntu 16.04 / 18.04 / 20.04 with ROS kinetic, melodic and **noetic**.
 
+> **Docs:** see [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) for full
+> implementation documentation (architecture, code walkthrough, configuration,
+> encoder/NVENC internals, build system and deployment), and
+> [`docker/`](docker/) for a ready-to-build Docker image (CPU and NVENC/GPU).
+
 
 ## Dependencies
 - ROS
