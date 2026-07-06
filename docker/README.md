@@ -10,6 +10,13 @@ Build (context = repo root):
 docker build -t ros_rtsp -f docker/Dockerfile .
 ```
 
+Smoke test — **no camera/config needed** (serves a GStreamer test pattern on
+`rtsp://<host>:8554/test`):
+
+```bash
+docker run --rm -it --network host ros_rtsp roslaunch ros_rtsp example.launch
+```
+
 Run — **CPU / x264**:
 
 ```bash

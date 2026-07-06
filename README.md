@@ -33,6 +33,19 @@ Navigate back to the catkin workspace root and make the package:
 ```bash
 cd ..
 catkin_make pkg:=ros_rtsp
+source devel/setup.bash
+```
+
+## Quick test (no camera needed)
+To verify the install end-to-end without any camera or ROS Image publisher, launch
+the built-in example. It serves a GStreamer test pattern over RTSP:
+```bash
+roslaunch ros_rtsp example.launch
+```
+Then play it (see [Checking the streams](#checking-the-streams) for client commands):
+```
+rtsp://127.0.0.1:8554/test     # moving ball
+rtsp://127.0.0.1:8554/clock    # SMPTE bars + clock overlay (handy for latency)
 ```
 
 ## Stream Setup
@@ -81,10 +94,27 @@ For any other hardware encoder (Intel/AMD VA-API, Jetson `nvv4l2h264enc`, ...) s
 ```
 
 ## Checking the streams
-Launch the streams from the ROS launch file:
+Launch the streams from the built-in ROS launch file (it loads
+`config/stream_setup.yaml`):
 ```bash
 roslaunch ros_rtsp rtsp_streams.launch
 ```
+
+The launch file takes optional arguments:
+```bash
+# Use your own config without editing the package:
+roslaunch ros_rtsp rtsp_streams.launch config:=/abs/path/to/my_streams.yaml
+
+# Load into an existing nodelet manager (e.g. your camera driver's) for
+# zero-copy image transport instead of starting a standalone one:
+roslaunch ros_rtsp rtsp_streams.launch start_manager:=false manager:=<existing_manager>
+```
+
+| arg | default | purpose |
+| --- | ------- | ------- |
+| `config` | `$(find ros_rtsp)/config/stream_setup.yaml` | stream configuration file to load |
+| `manager` | `standalone_nodelet` | nodelet manager name to load the RTSP nodelet into |
+| `start_manager` | `true` | start the manager (`false` to reuse an existing one) |
 
 In the following examples, replace the `rtsp://127.0.0.1:8554/front` with your servers IP address and mount point `rtsp://YOUR_IP:8554/MOUNT_POINT`.
 

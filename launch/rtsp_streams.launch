@@ -1,11 +1,24 @@
 <launch>
 
-  <!-- Start the RTSP server -->
-  <node pkg="nodelet" type="nodelet" name="standalone_nodelet" args="manager" output="screen"/>
+  <!-- Stream configuration file. Override to use your own without editing the package:
+       roslaunch ros_rtsp rtsp_streams.launch config:=/abs/path/to/my_streams.yaml -->
+  <arg name="config" default="$(find ros_rtsp)/config/stream_setup.yaml" />
 
-  <node pkg="nodelet" type="nodelet" name="Image2RTSPNodelet" args="load image2rtsp/Image2RTSPNodelet standalone_nodelet" output="screen">
-    <!-- Read the stream setup file -->
-    <rosparam command="load" file="$(find ros_rtsp)/config/stream_setup.yaml" />
+  <!-- Nodelet manager. By default a standalone manager is started to host the RTSP
+       server. To load into an existing manager (e.g. your camera driver's) for
+       zero-copy image transport on `topic` streams:
+       roslaunch ros_rtsp rtsp_streams.launch start_manager:=false manager:=<existing_manager> -->
+  <arg name="manager" default="standalone_nodelet" />
+  <arg name="start_manager" default="true" />
+
+  <!-- Start the RTSP server (nodelet manager process) -->
+  <node if="$(arg start_manager)" pkg="nodelet" type="nodelet"
+        name="$(arg manager)" args="manager" output="screen" />
+
+  <!-- Load the RTSP nodelet and hand it the stream setup -->
+  <node pkg="nodelet" type="nodelet" name="Image2RTSPNodelet"
+        args="load image2rtsp/Image2RTSPNodelet $(arg manager)" output="screen">
+    <rosparam command="load" file="$(arg config)" />
   </node>
 
 </launch>

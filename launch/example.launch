@@ -1,0 +1,20 @@
+<launch>
+
+  <!-- Self-contained RTSP demo.
+
+       Streams a GStreamer test pattern over RTSP with no camera and no ROS Image
+       publisher required, so you can verify an install end-to-end in one command:
+
+         roslaunch ros_rtsp example.launch
+
+       Then connect a client (see README) to:
+         rtsp://127.0.0.1:8554/test    (moving ball)
+         rtsp://127.0.0.1:8554/clock   (SMPTE bars + clock overlay, for latency)
+
+       It simply reuses the built-in launch file with the example configuration. -->
+
+  <include file="$(find ros_rtsp)/launch/rtsp_streams.launch">
+    <arg name="config" value="$(find ros_rtsp)/config/example_stream_setup.yaml" />
+  </include>
+
+</launch>

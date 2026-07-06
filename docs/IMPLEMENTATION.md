@@ -151,9 +151,11 @@ ros_rtsp/
 │   ├── image2rtsp.cpp        # nodelet: params, pipeline strings, encoder, ROS callbacks
 │   └── video.cpp             # GStreamer/RTSP server glue, main loop, signals
 ├── config/
-│   └── stream_setup.yaml     # stream definitions (edit this)
+│   ├── stream_setup.yaml     # your stream definitions (edit this)
+│   └── example_stream_setup.yaml  # demo streams used by example.launch
 ├── launch/
-│   └── rtsp_streams.launch   # loads the nodelet in a standalone manager
+│   ├── rtsp_streams.launch   # built-in launch (args: config, manager, start_manager)
+│   └── example.launch        # self-contained demo (GStreamer test pattern, no camera)
 └── docs/
     └── IMPLEMENTATION.md      # this file
 ```
@@ -578,14 +580,44 @@ sudo apt-get install \
 
 ### 11.1 Native (catkin)
 
+Quick self-contained demo (no camera or Image publisher needed — serves a
+GStreamer test pattern):
+
+```bash
+roslaunch ros_rtsp example.launch
+# then play rtsp://127.0.0.1:8554/test  (or /clock)
+```
+
+Normal launch (loads `config/stream_setup.yaml`):
+
 ```bash
 roslaunch ros_rtsp rtsp_streams.launch
 # streams announced on stdout, e.g.:
 #   Stream available at rtsp://0.0.0.0:8554/front
 ```
 
+`rtsp_streams.launch` arguments:
+
+| arg | default | purpose |
+| --- | ------- | ------- |
+| `config` | `$(find ros_rtsp)/config/stream_setup.yaml` | stream configuration file to load |
+| `manager` | `standalone_nodelet` | nodelet manager to load the RTSP nodelet into |
+| `start_manager` | `true` | start the manager, or `false` to reuse an existing one |
+
+```bash
+# own config:
+roslaunch ros_rtsp rtsp_streams.launch config:=/abs/path/to/my_streams.yaml
+```
+
 To get **zero-copy** from a camera nodelet, load `ros_rtsp` into the *same* nodelet
-manager as the camera driver instead of the standalone manager in the launch file.
+manager as the camera driver instead of starting a standalone one:
+
+```bash
+roslaunch ros_rtsp rtsp_streams.launch start_manager:=false manager:=<existing_manager>
+```
+
+`example.launch` is just a thin wrapper that `include`s `rtsp_streams.launch` with
+`config:=$(find ros_rtsp)/config/example_stream_setup.yaml`.
 
 ### 11.2 Docker — CPU (x264)
 
