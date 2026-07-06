@@ -53,6 +53,16 @@ static int member_int(XmlRpc::XmlRpcValue& stream, const char* key, int def) {
     }
 }
 
+/* Is a topic currently advertised on the ROS graph? Used only for a friendly
+ * startup warning - a topic may still appear later, so this never blocks a stream. */
+static bool topic_is_advertised(const std::string& topic) {
+    ros::master::V_TopicInfo infos;
+    if (!ros::master::getTopics(infos)) return true;   // can't reach master to check
+    for (size_t i = 0; i < infos.size(); ++i)
+        if (infos[i].name == topic) return true;
+    return false;
+}
+
 
 void Image2RTSPNodelet::onInit() {
     // Common tail shared by every stream. h264parse + config-interval makes the
@@ -124,9 +134,19 @@ void Image2RTSPNodelet::onInit() {
                     NODELET_ERROR("Stream '%s' (topic) has no 'source' topic - skipping.", name.c_str());
                     continue;
                 }
-                /* Track connected clients so we only subscribe while someone is watching. */
-                num_of_clients[mountpoint] = 0;
-                appsrc[mountpoint] = NULL;
+                if (!topic_is_advertised(source))
+                    NODELET_WARN("Stream '%s': source topic '%s' is not currently advertised. "
+                                 "The stream is registered anyway; clients will receive video once "
+                                 "something publishes to it (check the topic name/namespace if not).",
+                                 name.c_str(), source.c_str());
+                {
+                    /* Track connected clients so we only subscribe while someone is watching. */
+                    std::lock_guard<std::mutex> lk(mtx);
+                    num_of_clients[mountpoint] = 0;
+                    appsrc[mountpoint] = NULL;
+                    topic_source[mountpoint] = source;
+                    receiving[mountpoint] = false;
+                }
 
                 /* Optional 'caps': when set, rescale / cap the framerate before encoding.
                  * When omitted, serve the topic at its native resolution - the caps come
@@ -164,6 +184,28 @@ void Image2RTSPNodelet::onInit() {
         NODELET_ERROR("No streams were registered. The RTSP server is up on port %s but has "
                       "no mount points, so clients will get 'no factory for path ...'.",
                       this->port.c_str());
+
+    // Watchdog: while a client is connected, periodically warn if the source topic
+    // has no publisher, so an unreachable/mistyped topic is obvious in the log.
+    if (!topic_source.empty())
+        watchdog = nh.createTimer(ros::Duration(5.0), &Image2RTSPNodelet::checkTopics, this);
+}
+
+/* Periodic check: for every topic stream that currently has a client, warn (throttled)
+ * if nothing is publishing to its source topic. Keeps unreachable topics visible
+ * instead of the client just hanging until the RTSP media-prepare timeout. */
+void Image2RTSPNodelet::checkTopics(const ros::TimerEvent&) {
+    std::lock_guard<std::mutex> lk(mtx);
+    for (std::map<std::string, int>::const_iterator it = num_of_clients.begin();
+         it != num_of_clients.end(); ++it) {
+        if (it->second <= 0) continue;                 // nobody watching -> not subscribed
+        std::map<std::string, ros::Subscriber>::const_iterator s = subs.find(it->first);
+        if (s == subs.end()) continue;
+        if (s->second.getNumPublishers() == 0)
+            NODELET_WARN_THROTTLE(10.0,
+                "Stream %s: no publisher on source topic '%s' - connected clients will get no "
+                "video until it starts publishing.", it->first.c_str(), topic_source[it->first].c_str());
+    }
 }
 
 /* RTSP mount point for a stream. Defaults to "/<stream name>" when the stream
@@ -264,6 +306,8 @@ GstCaps* Image2RTSPNodelet::gst_caps_new_from_image(const sensor_msgs::Image::Co
 
 
 void Image2RTSPNodelet::imageCallback(const sensor_msgs::Image::ConstPtr& msg, const std::string& topic) {
+    std::lock_guard<std::mutex> lk(mtx);   // serialise with url_(dis)connected clearing appsrc
+
     // Only push once a client is connected and the media pipeline's appsrc exists.
     if (appsrc[topic] == NULL)
         return;
@@ -271,6 +315,13 @@ void Image2RTSPNodelet::imageCallback(const sensor_msgs::Image::ConstPtr& msg, c
     GstCaps *caps = gst_caps_new_from_image(msg);
     if (caps == NULL)   // unsupported encoding / big-endian (already logged, throttled)
         return;
+
+    if (!receiving[topic]) {   // first frame since (re)subscribe - confirm it's flowing
+        receiving[topic] = true;
+        NODELET_INFO("Stream %s: receiving frames from '%s' (%dx%d %s)",
+                     topic.c_str(), topic_source[topic].c_str(),
+                     msg->width, msg->height, msg->encoding.c_str());
+    }
 
     gst_app_src_set_caps(appsrc[topic], caps);
     gst_caps_unref(caps);   // set_caps takes its own ref; release ours (was leaked before)
@@ -302,8 +353,10 @@ void Image2RTSPNodelet::url_connected(string url) {
             std::string source     = member_string(stream, "source");
 
             if (type == "topic" && url == mountpoint && !source.empty()) {
+                std::lock_guard<std::mutex> lk(mtx);
                 if (num_of_clients[url] == 0) {
                     NODELET_INFO("Subscribing to '%s' for stream %s", source.c_str(), url.c_str());
+                    receiving[url] = false;
                     subs[url] = nh.subscribe<sensor_msgs::Image>(
                         source, 1,
                         boost::bind(&Image2RTSPNodelet::imageCallback, this, boost::placeholders::_1, url));
@@ -334,11 +387,13 @@ void Image2RTSPNodelet::url_disconnected(string url) {
 
             std::string mountpoint = stream_mountpoint(stream, it->first);
             if (url == mountpoint) {
+                std::lock_guard<std::mutex> lk(mtx);
                 if (num_of_clients[url] > 0) num_of_clients[url]--;
                 if (num_of_clients[url] == 0) {
                     // No-one else is connected. Stop the subscription.
                     subs[url].shutdown();
                     appsrc[url] = NULL;
+                    receiving[url] = false;
                 }
             }
         }

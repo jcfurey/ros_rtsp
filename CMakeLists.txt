@@ -135,7 +135,9 @@ include_directories(
 # add_library(${PROJECT_NAME}
 #   src/${PROJECT_NAME}/ros_rtsp.cpp
 # )
-add_library(image_to_rtsp_nodelet src/image2rtsp.cpp src/video.cpp)
+# Library name is package-specific (not the generic "image_to_rtsp_nodelet") so
+# the .so can't collide with another package that builds a like-named library.
+add_library(ros_rtsp_nodelet src/image2rtsp.cpp src/video.cpp)
 
 
 ## Add cmake target dependencies of the library
@@ -157,9 +159,9 @@ add_library(image_to_rtsp_nodelet src/image2rtsp.cpp src/video.cpp)
 ## same as for the library above
 
 ## Specify libraries to link a library or executable target against
-target_link_libraries(image_to_rtsp_nodelet 
-  ${catkin_LIBRARIES} 
-  ${GST_LIBRARIES} 
+target_link_libraries(ros_rtsp_nodelet
+  ${catkin_LIBRARIES}
+  ${GST_LIBRARIES}
 )
 
 
@@ -170,7 +172,7 @@ target_link_libraries(image_to_rtsp_nodelet
 # all install targets should use catkin DESTINATION variables
 # See http://ros.org/doc/api/catkin/html/adv_user_guide/variables.html
 
-install(TARGETS image_to_rtsp_nodelet
+install(TARGETS ros_rtsp_nodelet
         LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
 )
 

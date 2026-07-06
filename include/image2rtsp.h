@@ -3,6 +3,7 @@
 
 #include <map>
 #include <string>
+#include <mutex>
 
 #include <ros/ros.h>
 #include <nodelet/nodelet.h>
@@ -27,6 +28,11 @@ namespace image2rtsp {
             std::map<std::string, ros::Subscriber> subs;
             std::map<std::string, GstAppSrc*> appsrc;
             std::map<std::string, int> num_of_clients;
+            std::map<std::string, std::string> topic_source;   // mount -> source topic (topic streams)
+            std::map<std::string, bool> receiving;             // mount -> have we logged first frame
+            std::mutex mtx;                                    // guards the maps above (GLib vs ROS threads)
+            ros::Timer watchdog;                               // warns about unreachable source topics
+            void checkTopics(const ros::TimerEvent&);
             std::string stream_mountpoint(XmlRpc::XmlRpcValue& stream, const std::string& name);
             std::string build_encoder(XmlRpc::XmlRpcValue& stream, const std::string& bitrate);
             GstCaps* gst_caps_new_from_image(const sensor_msgs::Image::ConstPtr &msg);
