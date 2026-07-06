@@ -51,25 +51,40 @@ rtsp://127.0.0.1:8554/clock    # SMPTE bars + clock overlay (handy for latency)
 ## Stream Setup
 Change the `config/stream_setup.yaml` to suit your required streams.
 
+### Just point at a ROS topic
+For a ROS Image topic, only `type` and `source` are required — everything else has
+a sensible default:
+
 ```yaml
-# Set up your streams for rtsp here.
 streams:
+  backcam:                       # the stream name; also the default mountpoint
+    type: topic
+    source: /camera/image_raw    # the sensor_msgs/Image topic to serve
+    #                            -> rtsp://<server_ip>:8554/backcam
+```
 
-  # Example v4l2 camera stream
-  stream-1: # Can name this whatever you choose
-    type: cam  # cam - Will not look in ROS for a image. The video src is set in the 'source' parameter.
-    source: "v4l2src device=/dev/video0 ! videoconvert ! videoscale ! video/x-raw,framerate=15/1,width=1280,height=720"  # You can enter any valid gstreamer source and caps here as long as it ends in raw video
-    mountpoint: /front      # Choose the mountpoint for the rtsp stream. This will be able to be accessed from rtsp://<server_ip>/front
-    bitrate: 800            # bitrate for the h264 encoding.
+Defaults when a field is omitted: `mountpoint` → `/<stream name>`, `bitrate` → `500`
+kbit/s, `encoder` → `x264`, and with no `caps` the topic is served at its **native
+resolution**.
 
-  # Example ROS Image topic stream
-  stream2:
-    type: topic  # topic - Image is sourced from a sensor_msgs::Image topic
-    source: /usb_cam0/image_raw  # The ROS topic to subscribe to
-    mountpoint: /back      # Choose the mountpoint for the rtsp stream. This will be able to be accessed from rtsp://<server_ip>/back
-    caps: video/x-raw,framerate=10/1,width=640,height=480  # Set the caps to be applied after getting the ROS Image and before the encoder.
-    bitrate: 500
-    encoder: nvenc         # Optional. x264 (default, software) or nvenc (NVIDIA hardware). See below.
+### Full options
+```yaml
+streams:
+  # ROS Image topic, every optional knob spelled out
+  frontcam:
+    type: topic
+    source: /usb_cam0/image_raw
+    mountpoint: /front     # RTSP path (default: /<stream name>)
+    bitrate: 800           # H.264 target, kbit/s (default: 500)
+    encoder: nvenc         # x264 (default, software) or nvenc (NVIDIA hardware). See below.
+    caps: video/x-raw,framerate=10/1,width=640,height=480  # optional: rescale / cap framerate
+
+  # A non-ROS GStreamer source (e.g. a v4l2 camera) served directly
+  usbcam:
+    type: cam              # cam - not sourced from ROS; 'source' is a full GStreamer source ending in raw video
+    source: "v4l2src device=/dev/video0 ! videoconvert ! videoscale ! video/x-raw,framerate=15/1,width=1280,height=720"
+    mountpoint: /usb
+    bitrate: 800
 ```
 Add as many streams as you require.
 
