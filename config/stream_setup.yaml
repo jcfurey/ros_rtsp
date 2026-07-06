@@ -7,6 +7,10 @@ streams: # Cannot rename - must leave this as is.
     source: "v4l2src device=/dev/video0 ! videoconvert ! videoscale ! video/x-raw,framerate=15/1,width=1280,height=720"
     mountpoint: /front
     bitrate: 500
+    # encoder: choose the H.264 encoder (optional, default: x264)
+    #   x264  -> software encoding, works everywhere, no GPU required
+    #   nvenc -> NVIDIA hardware encoding (needs the NVIDIA driver + gstreamer1.0-plugins-bad)
+    encoder: x264
 
   stream-yay:
     type: topic
@@ -14,4 +18,14 @@ streams: # Cannot rename - must leave this as is.
     mountpoint: /back
     caps: video/x-raw,framerate=10/1,width=640,height=480
     bitrate: 500
+    encoder: x264   # change to 'nvenc' to offload H.264 encoding to an NVIDIA GPU
 
+  # Advanced: for any other hardware encoder (Intel/AMD VA-API, Jetson, ...) set
+  # 'encoder_override' to the full encoder + output caps fragment. It is used
+  # verbatim in place of the built-in encoder. Examples:
+  #
+  #   # Intel / AMD VA-API
+  #   encoder_override: "videoconvert ! vaapih264enc rate-control=cbr bitrate=500 keyframe-period=30 ! video/x-h264, profile=baseline"
+  #
+  #   # NVIDIA Jetson (bitrate is in bits/sec here)
+  #   encoder_override: "nvvidconv ! nvv4l2h264enc bitrate=500000 insert-sps-pps=true iframeinterval=30 maxperf-enable=1 ! video/x-h264, profile=baseline"

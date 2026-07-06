@@ -1,6 +1,17 @@
 #ifndef IMAGE_TO_RTSP_H
 #define IMAGE_TO_RTSP_H
 
+#include <map>
+#include <string>
+
+#include <ros/ros.h>
+#include <nodelet/nodelet.h>
+#include <sensor_msgs/Image.h>
+
+#include <gst/gst.h>
+#include <gst/app/gstappsrc.h>
+#include <gst/rtsp-server/rtsp-server.h>
+
 namespace image2rtsp {
     class Image2RTSPNodelet : public nodelet::Nodelet {
         public:
@@ -12,10 +23,11 @@ namespace image2rtsp {
             void print_error(char *s);
 
         private:
-      std::string port;
+            std::string port;
             std::map<std::string, ros::Subscriber> subs;
             std::map<std::string, GstAppSrc*> appsrc;
             std::map<std::string, int> num_of_clients;
+            std::string build_encoder(XmlRpc::XmlRpcValue& stream, const std::string& bitrate);
             GstCaps* gst_caps_new_from_image(const sensor_msgs::Image::ConstPtr &msg);
             void imageCallback(const sensor_msgs::Image::ConstPtr& msg, const std::string& topic);
             void video_mainloop_start();

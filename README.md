@@ -2,15 +2,19 @@
 ROS package to subscribe to an ROS Image topic (and as many other video sources as you want) and serve it up as a RTSP video feed with different mount points.
 Should provide a real-time video feed (or as close as possible).
 
-This is still very much a work in progress. Developing on Ubuntu 16.04 and 18.04 with ROS kinetic and melodic.
+Runs on Ubuntu 16.04 / 18.04 / 20.04 with ROS kinetic, melodic and **noetic**.
 
 
 ## Dependencies
 - ROS
 
-- gstreamer libs:
+- gstreamer libs. Either let `rosdep` pull them in (they are declared in `package.xml`):
 ```bash
-sudo apt-get install libgstreamer-plugins-base1.0-dev libgstreamer-plugins-good1.0-dev libgstreamer-plugins-bad1.0-dev libgstrtspserver-1.0-dev gstreamer1.0-plugins-ugly gstreamer1.0-plugins-bad
+rosdep install --from-paths . --ignore-src -r -y
+```
+or install them manually:
+```bash
+sudo apt-get install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-good1.0-dev libgstreamer-plugins-bad1.0-dev libgstrtspserver-1.0-dev gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
 ```
 
 ## Build into your catkin workspace
@@ -45,10 +49,31 @@ streams:
     type: topic  # topic - Image is sourced from a sensor_msgs::Image topic
     source: /usb_cam0/image_raw  # The ROS topic to subscribe to
     mountpoint: /back      # Choose the mountpoint for the rtsp stream. This will be able to be accessed from rtsp://<server_ip>/back
-    caps: video/x-raw,framerate=10/1,width=640,height=480  # Set the caps to be applied after getting the ROS Image and before the x265 encoder.
+    caps: video/x-raw,framerate=10/1,width=640,height=480  # Set the caps to be applied after getting the ROS Image and before the encoder.
     bitrate: 500
+    encoder: nvenc         # Optional. x264 (default, software) or nvenc (NVIDIA hardware). See below.
 ```
 Add as many streams as you require.
+
+## Hardware acceleration (NVENC)
+Encoding is the most CPU-hungry part of the pipeline. Each stream can pick its H.264 encoder with the optional `encoder` parameter:
+
+- `encoder: x264` &nbsp;— software encoding (default). Works everywhere, no GPU required.
+- `encoder: nvenc` — NVIDIA hardware encoding (`nvh264enc`). Offloads encoding to the GPU for much lower CPU usage and latency.
+
+`bitrate` is in kbit/sec for both and needs no change when switching. NVENC needs the proprietary NVIDIA driver and the `nvcodec` GStreamer plugin (shipped in `gstreamer1.0-plugins-bad`). Verify it is available with:
+```bash
+gst-inspect-1.0 nvh264enc
+```
+
+For any other hardware encoder (Intel/AMD VA-API, Jetson `nvv4l2h264enc`, ...) set `encoder_override` to the full encoder + output-caps fragment and it is used verbatim:
+```yaml
+  # Intel / AMD VA-API
+  encoder_override: "videoconvert ! vaapih264enc rate-control=cbr bitrate=500 keyframe-period=30 ! video/x-h264, profile=baseline"
+
+  # NVIDIA Jetson (bitrate here is in bits/sec)
+  encoder_override: "nvvidconv ! nvv4l2h264enc bitrate=500000 insert-sps-pps=true iframeinterval=30 maxperf-enable=1 ! video/x-h264, profile=baseline"
+```
 
 ## Checking the streams
 Launch the streams from the ROS launch file:
