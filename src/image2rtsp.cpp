@@ -98,11 +98,20 @@ void Image2RTSPNodelet::onInit() {
 
 /* RTSP mount point for a stream. Defaults to "/<stream name>" when the stream
  * omits the 'mountpoint' parameter. Used by onInit() and the client connect/
- * disconnect handlers so they all agree on the same path. */
+ * disconnect handlers so they all agree on the same path.
+ *
+ * gst-rtsp-server requires the path to start with '/'
+ * (gst_rtsp_mount_points_add_factory: g_return_if_fail(path[0] == '/')). A path
+ * without the leading slash is silently rejected there and the mount never gets
+ * registered ("no factory for path ..."), so normalise it here and be forgiving
+ * if the config writes e.g. "backcam" instead of "/backcam". */
 std::string Image2RTSPNodelet::stream_mountpoint(XmlRpc::XmlRpcValue& stream, const std::string& name) {
-    if (stream.hasMember("mountpoint"))
-        return static_cast<std::string>(stream["mountpoint"]);
-    return "/" + name;
+    std::string mp = stream.hasMember("mountpoint")
+        ? static_cast<std::string>(stream["mountpoint"])
+        : name;
+    if (mp.empty() || mp.front() != '/')
+        mp = "/" + mp;
+    return mp;
 }
 
 /* Build the GStreamer encoder fragment for a stream (encoder element through the
