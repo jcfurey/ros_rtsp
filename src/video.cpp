@@ -20,7 +20,7 @@ static void *mainloop(void *arg) {
 
     g_main_loop_run(loop);
 
-    g_main_destroy(loop);
+    g_main_loop_unref(loop);
     return NULL;
 }
 

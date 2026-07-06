@@ -13,7 +13,7 @@
   <!-- One license tag required, multiple allowed, one license per tag -->
   <!-- Commonly used license strings: -->
   <!--   BSD, MIT, Boost Software License, GPLv2, GPLv3, LGPLv2.1, LGPLv3 -->
-  <license>TODO</license>
+  <license>Unlicense</license>
 
 
   <!-- Url tags are optional, but multiple are allowed, one per tag -->
@@ -57,6 +57,14 @@
   <exec_depend>roscpp</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>nodelet</exec_depend>
+
+  <!-- GStreamer (build + runtime). Resolved by rosdep on Noetic/Ubuntu 20.04. -->
+  <depend>libgstreamer1.0-dev</depend>
+  <depend>libgstreamer-plugins-base1.0-dev</depend>
+  <depend>libgstrtspserver-1.0-dev</depend>
+  <exec_depend>gstreamer1.0-plugins-good</exec_depend>
+  <exec_depend>gstreamer1.0-plugins-bad</exec_depend>
+  <exec_depend>gstreamer1.0-plugins-ugly</exec_depend>
 
 
   <!-- The export tag contains other, unspecified, tags -->

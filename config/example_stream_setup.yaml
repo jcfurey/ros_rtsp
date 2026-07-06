@@ -1,0 +1,26 @@
+# Self-contained RTSP demo — no camera and no ROS Image publisher required.
+# The frames come from GStreamer's built-in `videotestsrc` (a moving test pattern),
+# so this works on any machine with GStreamer installed.
+#
+#   roslaunch ros_rtsp example.launch
+#
+# then play the stream (see README for client commands):
+#   rtsp://127.0.0.1:8554/test
+port: "8554"
+streams:
+
+  # A moving test pattern, encoded with software x264 (works everywhere).
+  test-pattern:
+    type: cam
+    source: "videotestsrc is-live=true pattern=ball ! videoconvert ! video/x-raw,framerate=30/1,width=1280,height=720"
+    mountpoint: /test
+    bitrate: 1000
+    encoder: x264   # change to 'nvenc' to verify NVIDIA hardware encoding
+
+  # Colour bars with a timestamp overlay — handy for eyeballing latency.
+  test-clock:
+    type: cam
+    source: "videotestsrc is-live=true pattern=smpte ! clockoverlay ! videoconvert ! video/x-raw,framerate=30/1,width=640,height=480"
+    mountpoint: /clock
+    bitrate: 500
+    encoder: x264

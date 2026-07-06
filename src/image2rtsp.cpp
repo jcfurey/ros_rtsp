@@ -1,4 +1,6 @@
 #include <string>
+#include <algorithm>
+#include <cctype>
 #include <stdio.h>
 #include <nodelet/nodelet.h>
 #include <pluginlib/class_list_macros.h>
@@ -6,6 +8,7 @@
 #include <gst/app/gstappsrc.h>
 #include <gst/rtsp-server/rtsp-server.h>
 #include <ros/ros.h>
+#include <boost/bind/bind.hpp>
 #include "sensor_msgs/Image.h"
 #include <sensor_msgs/image_encodings.h>
 #include <image2rtsp.h>
@@ -17,7 +20,9 @@ using namespace image2rtsp;
 
 void Image2RTSPNodelet::onInit() {
     string pipeline, mountpoint, bitrate, caps;
-    string pipeline_tail =  " key-int-max=30 ! video/x-h264, profile=baseline ! rtph264pay name=pay0 pt=96 )"; // Gets completed based on rosparams below
+    // Common tail shared by every stream. h264parse + config-interval makes the
+    // encoded SPS/PPS available to clients that connect mid-stream (shared factory).
+    string pipeline_tail = " ! h264parse ! rtph264pay name=pay0 pt=96 config-interval=1 )";
 
     NODELET_DEBUG("Initializing image2rtsp nodelet...");
 
@@ -36,7 +41,7 @@ void Image2RTSPNodelet::onInit() {
     nh.getParam("port", this->port);
 
     video_mainloop_start();
-  rtsp_server = rtsp_server_create(port);
+    rtsp_server = rtsp_server_create(port);
 
     // Go through and parse each stream
     for(XmlRpc::XmlRpcValue::ValueStruct::const_iterator it = streams.begin(); it != streams.end(); ++it)
@@ -48,10 +53,13 @@ void Image2RTSPNodelet::onInit() {
         mountpoint = static_cast<std::string>(stream["mountpoint"]);
         bitrate = std::to_string(static_cast<int>(stream["bitrate"]));
 
+        // Pick the H.264 encoder: software x264 (default), NVIDIA nvenc, or a custom override.
+        std::string encoder = build_encoder(stream, bitrate);
+
         // uvc camera?
         if (stream["type"]=="cam")
         {
-            pipeline = "( " + static_cast<std::string>(stream["source"]) + " ! x264enc tune=zerolatency bitrate=" + bitrate + pipeline_tail;
+            pipeline = "( " + static_cast<std::string>(stream["source"]) + " ! " + encoder + pipeline_tail;
 
             rtsp_server_add_url(mountpoint.c_str(), pipeline.c_str(), NULL);
         }
@@ -65,7 +73,7 @@ void Image2RTSPNodelet::onInit() {
             caps = static_cast<std::string>(stream["caps"]);
 
             // Setup the full pipeline
-            pipeline = "( appsrc name=imagesrc do-timestamp=true min-latency=0 max-latency=0 max-bytes=1000 is-live=true ! videoconvert ! videoscale ! " + caps + " ! x264enc tune=zerolatency bitrate=" + bitrate + pipeline_tail;
+            pipeline = "( appsrc name=imagesrc do-timestamp=true min-latency=0 max-latency=0 max-bytes=1000 is-live=true ! videoconvert ! videoscale ! " + caps + " ! " + encoder + pipeline_tail;
 
             // Add the pipeline to the rtsp server
             rtsp_server_add_url(mountpoint.c_str(), pipeline.c_str(), (GstElement **)&(appsrc[mountpoint]));
@@ -74,8 +82,52 @@ void Image2RTSPNodelet::onInit() {
         {
             ROS_ERROR("Undefined stream type. Check your stream_setup.yaml file.");
         }
-        NODELET_INFO("Stream available at rtsp://%s:%s%s", gst_rtsp_server_get_address(rtsp_server), port.c_str(), mountpoint.c_str());
+        gchar *server_address = gst_rtsp_server_get_address(rtsp_server);
+        NODELET_INFO("Stream available at rtsp://%s:%s%s", server_address, port.c_str(), mountpoint.c_str());
+        g_free(server_address);
     }
+}
+
+/* Build the GStreamer encoder fragment for a stream (encoder element through the
+ * output caps, i.e. everything between the raw-video source and rtph264pay).
+ *
+ * Selected with the optional per-stream parameters:
+ *   encoder: x264   (default) - software H.264, works everywhere, no GPU required
+ *   encoder: nvenc            - NVIDIA hardware H.264 (gst-plugins-bad "nvcodec", nvh264enc)
+ *   encoder_override: "..."   - full custom encoder+caps fragment, used verbatim
+ *                               (for VA-API, Jetson nvv4l2h264enc, etc.)
+ *
+ * bitrate is forwarded unchanged in kbit/sec, matching both x264enc and nvh264enc.
+ */
+std::string Image2RTSPNodelet::build_encoder(XmlRpc::XmlRpcValue& stream, const std::string& bitrate) {
+    // Full manual override wins: the user supplies the whole encoder + caps fragment.
+    if (stream.hasMember("encoder_override")) {
+        return static_cast<std::string>(stream["encoder_override"]);
+    }
+
+    std::string encoder = "x264";
+    if (stream.hasMember("encoder")) {
+        encoder = static_cast<std::string>(stream["encoder"]);
+    }
+    std::transform(encoder.begin(), encoder.end(), encoder.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+
+    if (encoder == "nvenc" || encoder == "nvh264enc" || encoder == "nv") {
+        // NVIDIA desktop hardware encoder. videoconvert guarantees an input format
+        // nvenc accepts; bitrate stays in kbit/sec.
+        NODELET_INFO("Using NVIDIA hardware encoder (nvh264enc)");
+        return "videoconvert ! nvh264enc bitrate=" + bitrate +
+               " gop-size=30 rc-mode=cbr preset=low-latency-hq ! video/x-h264, profile=baseline";
+    }
+
+    if (encoder != "x264" && encoder != "x264enc" && encoder != "sw") {
+        NODELET_WARN("Unknown encoder '%s', falling back to software x264. "
+                     "Use 'encoder_override' for a fully custom pipeline.", encoder.c_str());
+    }
+
+    // Default: software x264 (identical to the original pipeline).
+    return "x264enc tune=zerolatency bitrate=" + bitrate +
+           " key-int-max=30 ! video/x-h264, profile=baseline";
 }
 
 /* Modified from https://github.com/ProjectArtemis/gst_video_server/blob/master/src/server_nodelet.cpp */
