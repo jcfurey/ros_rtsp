@@ -326,8 +326,14 @@ void Image2RTSPNodelet::imageCallback(const sensor_msgs::Image::ConstPtr& msg, c
     gst_app_src_set_caps(appsrc[topic], caps);
     gst_caps_unref(caps);   // set_caps takes its own ref; release ours (was leaked before)
 
-    GstBuffer *buf = gst_buffer_new_allocate(nullptr, msg->data.size(), nullptr);
-    gst_buffer_fill(buf, 0, msg->data.data(), msg->data.size());
+    /* Zero-copy: wrap the ROS image data instead of memcpy'ing it, and keep the
+     * message alive (a heap-held ConstPtr) until GStreamer is done with the buffer. */
+    GstBuffer *buf = gst_buffer_new_wrapped_full(
+        (GstMemoryFlags)0,
+        (gpointer)msg->data.data(), msg->data.size(),   // data + maxsize
+        0, msg->data.size(),                            // offset + size
+        new sensor_msgs::Image::ConstPtr(msg),          // user_data: keeps msg alive
+        [](gpointer p){ delete static_cast<sensor_msgs::Image::ConstPtr*>(p); });
     GST_BUFFER_FLAG_SET(buf, GST_BUFFER_FLAG_LIVE);
 
     gst_app_src_push_buffer(appsrc[topic], buf);   // takes ownership of buf
@@ -390,9 +396,10 @@ void Image2RTSPNodelet::url_disconnected(string url) {
                 std::lock_guard<std::mutex> lk(mtx);
                 if (num_of_clients[url] > 0) num_of_clients[url]--;
                 if (num_of_clients[url] == 0) {
-                    // No-one else is connected. Stop the subscription.
+                    // No-one else is connected. Stop the subscription. The appsrc
+                    // itself is released by on_media_unprepared() when the shared
+                    // media is torn down, so a reconnecting client still finds it.
                     subs[url].shutdown();
-                    appsrc[url] = NULL;
                     receiving[url] = false;
                 }
             }
@@ -402,6 +409,24 @@ void Image2RTSPNodelet::url_disconnected(string url) {
                          it->first.c_str(), e.getMessage().c_str());
         }
     }
+}
+
+/* Called (on the GStreamer thread) when a mount's shared media is torn down.
+ * This is the catch-all that also handles clients which vanish without a clean
+ * RTSP TEARDOWN: release the appsrc ref taken in media_configure, drop the
+ * subscription, and reset the client count so the topic isn't consumed forever. */
+void Image2RTSPNodelet::on_media_unprepared(const std::string& mount) {
+    std::lock_guard<std::mutex> lk(mtx);
+    std::map<std::string, GstAppSrc*>::iterator a = appsrc.find(mount);
+    if (a != appsrc.end() && a->second != NULL) {
+        gst_object_unref(a->second);   // release the ref from gst_bin_get_by_name()
+        a->second = NULL;
+    }
+    num_of_clients[mount] = 0;
+    receiving[mount] = false;
+    std::map<std::string, ros::Subscriber>::iterator s = subs.find(mount);
+    if (s != subs.end()) s->second.shutdown();
+    NODELET_INFO("Stream %s: RTSP media released; source subscription stopped.", mount.c_str());
 }
 
 void Image2RTSPNodelet::print_info(char *s) {

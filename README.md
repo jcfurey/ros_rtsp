@@ -128,7 +128,7 @@ roslaunch ros_rtsp rtsp_streams.launch start_manager:=false manager:=<existing_m
 | arg | default | purpose |
 | --- | ------- | ------- |
 | `config` | `$(find ros_rtsp)/config/stream_setup.yaml` | stream configuration file to load |
-| `manager` | `standalone_nodelet` | nodelet manager name to load the RTSP nodelet into |
+| `manager` | `rtsp_nodelet_manager` | nodelet manager name to load the RTSP nodelet into |
 | `start_manager` | `true` | start the manager (`false` to reuse an existing one) |
 
 In the following examples, replace the `rtsp://127.0.0.1:8554/front` with your servers IP address and mount point `rtsp://YOUR_IP:8554/MOUNT_POINT`.
@@ -153,7 +153,36 @@ If you wish to use the VLC mobile app to stream on Android or iOS, navigate to t
 
 
 ## Debugging
-- If too much latency is encounted with multiple streams running, the server computer may be maxing out its processor trying to encode all the streams. Try reducing the resolution of the source caps.
-- The ROS Image topic stream may be buggy with framerates too fast for the Image publisher and the buffer writing. Stick with 10/1 fps unless you want to debug? :)
+- If too much latency is encounted with multiple streams running, the server computer may be maxing out its processor trying to encode all the streams. Try reducing the resolution of the source caps, or switch that stream to `encoder: nvenc`.
 - If too many frames are being dropped, it is likely due to network bandwidth. Try dropping the bitrate.
-- If the ROS topic isn't available, you will get a `can't prepare media` error after a delay.
+
+### Reading the node's startup log
+The node logs exactly what it did on startup; match the line you see to the cause:
+
+| Log line | Meaning / fix |
+| -------- | ------------- |
+| `Stream '<name>' available at rtsp://0.0.0.0:8554/<mount>` | That mount registered fine. |
+| `image2rtsp: N of M stream(s) registered on port 8554.` | Summary. If `N < M`, the skipped streams logged a reason just above. |
+| `No valid 'streams' parameter under namespace '/...'` | The YAML didn't load into the node — check the launch file's `rosparam load` and the namespace it names. |
+| `Stream 'x' … has no 'source' …` / `unknown type …` | That stream's config is incomplete; fix the named field. Other streams still run. |
+| `Stream 'x' skipped - bad parameter …` | A field has the wrong type (e.g. `bitrate: "500"` as a string is tolerated, but truly non-numeric isn't). |
+| `source topic '/foo' is not currently advertised` | The topic isn't being published yet. The stream is still registered; it works once something publishes to `/foo` (check the name/namespace if it never does). |
+| `Stream /cam: no publisher on source topic '/foo'` (recurring) | A client is connected but nothing is publishing to the source — clients get no video until it does. |
+| `Stream /cam: receiving frames from '/foo' (WxH enc)` | Frames are flowing — the stream is live. |
+| `GST: image encoding '<enc>' is not supported` | The topic publishes an encoding this node can't map (use `rgb8`/`bgr8`/`mono8`/…). |
+| `Failed to start the RTSP server on port 8554 …` | Port already in use — another instance/RTSP server is still running. |
+
+### Client-side symptoms
+| Symptom | Cause / fix |
+| ------- | ----------- |
+| `no factory for path /foo` | No mount is registered at `/foo`. Check the startup log for a `Stream … available at …/foo` line; if it's missing, that stream didn't register (see the table above). Make sure the mount path matches exactly (leading `/`). |
+| `could not prepare media` / 503 after a delay | The mount exists but no frames are flowing — the source topic isn't publishing (see "no publisher" above), or publishes an unsupported encoding. |
+| Stream connects but is laggy | Use the `gst-launch`/`mpv` client commands below, not VLC (VLC buffers heavily). Reduce `bitrate` if the network is the bottleneck. |
+| `assertion 'path[0] == '/'' failed` (older builds) | A mountpoint without a leading `/`. Current builds normalise this automatically; rebuild, or add the leading `/`. |
+
+### Stale build / library shadowing
+If code changes seem to have no effect, another package may be shadowing the nodelet library, or `devel/` is stale. The library is `libros_rtsp_nodelet.so`; make sure only one copy is on the path:
+```bash
+find / -name 'libros_rtsp_nodelet.so' -o -name 'libimage_to_rtsp_nodelet.so' 2>/dev/null   # expect one, from your workspace
+cd ~/catkin_ws && rm -rf build devel && catkin_make && source devel/setup.bash             # clean rebuild
+```

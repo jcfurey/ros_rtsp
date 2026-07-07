@@ -15,6 +15,17 @@ using namespace std;
 using namespace image2rtsp;
 
 
+/* Per-mount context handed to the media-configure / unprepared callbacks so they
+ * can find the owning nodelet, the mount path, and where to stash the appsrc. */
+struct MediaCtx {
+    Image2RTSPNodelet *nodelet;
+    std::string mount;
+    GstElement **appsrc;   // -> nodelet's appsrc[mount] map entry
+};
+
+static void media_ctx_free(gpointer p) { delete static_cast<MediaCtx*>(p); }
+
+
 static void *mainloop(void *arg) {
     GMainLoop *loop = g_main_loop_new(NULL, FALSE);
 
@@ -83,7 +94,11 @@ GstRTSPServer *Image2RTSPNodelet::rtsp_server_create(const std::string& port) {
   g_object_set(server, "service", port.c_str(), NULL);
 
     /* attach the server to the default maincontext */
-    gst_rtsp_server_attach(server, NULL);
+    if (gst_rtsp_server_attach(server, NULL) == 0) {
+        NODELET_FATAL("Failed to start the RTSP server on port %s - is the port already in "
+                      "use (another ros_rtsp / RTSP server still running)? No streams will "
+                      "be reachable.", port.c_str());
+    }
 
     g_signal_connect(server, "client-connected", G_CALLBACK(new_client), this);
 
@@ -94,18 +109,31 @@ GstRTSPServer *Image2RTSPNodelet::rtsp_server_create(const std::string& port) {
 }
 
 
+/* fired when a media (RTSP pipeline instance) is torn down. Safety net that also
+ * covers clients which vanish without a clean TEARDOWN: release the appsrc and
+ * stop the ROS subscription so we don't keep consuming the topic or hold a stale
+ * appsrc pointer. */
+static void media_unprepared(GstRTSPMedia *media, MediaCtx *ctx)
+{
+    if (ctx && ctx->nodelet)
+        ctx->nodelet->on_media_unprepared(ctx->mount);
+}
+
 /* called when a new media pipeline is constructed. We can query the
  * pipeline and configure our appsrc */
-static void media_configure(GstRTSPMediaFactory *factory, GstRTSPMedia *media, GstElement **appsrc)
-{    if (appsrc) {
+static void media_configure(GstRTSPMediaFactory *factory, GstRTSPMedia *media, MediaCtx *ctx)
+{    if (ctx) {
         GstElement *pipeline = gst_rtsp_media_get_element(media);
 
-        *appsrc = gst_bin_get_by_name(GST_BIN(pipeline), "imagesrc");
+        *ctx->appsrc = gst_bin_get_by_name(GST_BIN(pipeline), "imagesrc");
 
         /* this instructs appsrc that we will be dealing with timed buffer */
-        gst_util_set_object_arg(G_OBJECT(*appsrc), "format", "time");
+        gst_util_set_object_arg(G_OBJECT(*ctx->appsrc), "format", "time");
 
         gst_object_unref(pipeline);
+
+        /* clean up when this media goes away (covers clients that just vanish) */
+        g_signal_connect(media, "unprepared", G_CALLBACK(media_unprepared), ctx);
     }
     else
     {
@@ -151,9 +179,21 @@ void Image2RTSPNodelet::rtsp_server_add_url(const char *url, const char *sPipeli
     factory = gst_rtsp_media_factory_new();
     gst_rtsp_media_factory_set_launch(factory, sPipeline);
 
+    /* For topic streams (appsrc != NULL) build a context so media-configure can
+     * wire the appsrc and the unprepared cleanup. cam streams pass NULL and take
+     * the multicast-address-pool branch. The context is owned by the factory. */
+    MediaCtx *ctx = NULL;
+    if (appsrc != NULL) {
+        ctx = new MediaCtx();
+        ctx->nodelet = this;
+        ctx->mount   = url;
+        ctx->appsrc  = appsrc;
+        g_object_set_data_full(G_OBJECT(factory), "ros_rtsp_ctx", ctx, media_ctx_free);
+    }
+
     /* notify when our media is ready, This is called whenever someone asks for
      * the media and a new pipeline is created */
-    g_signal_connect(factory, "media-configure", (GCallback)media_configure, appsrc);
+    g_signal_connect(factory, "media-configure", (GCallback)media_configure, ctx);
 
     gst_rtsp_media_factory_set_shared(factory, TRUE);
 

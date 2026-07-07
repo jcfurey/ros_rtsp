@@ -20,6 +20,7 @@ namespace image2rtsp {
             void onInit();
             void url_connected(std::string url);
             void url_disconnected(std::string url);
+            void on_media_unprepared(const std::string& mount);
             void print_info(char *s);
             void print_error(char *s);
 
