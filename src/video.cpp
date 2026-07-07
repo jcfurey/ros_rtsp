@@ -24,12 +24,13 @@ using namespace image2rtsp;
 static const char *AUTH_ROLE = "ros-rtsp-user";
 
 
-/* Per-mount context handed to the media-configure / unprepared callbacks so they
- * can find the owning nodelet, the mount path, and where to stash the appsrc. */
+/* Per-mount context handed to the media-configure / unprepared callbacks. Owned
+ * by the factory (g_object_set_data_full), shared by every media the factory
+ * constructs - so it carries only immutable identity, never per-media state. */
 struct MediaCtx {
     Image2RTSPNodelet *nodelet;
     std::string mount;
-    GstElement **appsrc;   // -> nodelet's appsrc[mount] map entry
+    bool topic_stream;
 };
 
 static void media_ctx_free(gpointer p) { delete static_cast<MediaCtx*>(p); }
@@ -53,12 +54,15 @@ void Image2RTSPNodelet::video_mainloop_start() {
 }
 
 
-static void client_options(GstRTSPClient *client, GstRTSPContext *state, Image2RTSPNodelet *nodelet) {
+/* Client-count bookkeeping. PLAY (not OPTIONS) marks a watching client: OPTIONS
+ * is not gated by authentication and is sent by probes/keep-alives, so counting
+ * it would let an unauthenticated probe distort the count. The ROS subscription
+ * does not depend on these counts - it follows the media lifecycle below. */
+static void client_play(GstRTSPClient *client, GstRTSPContext *state, Image2RTSPNodelet *nodelet) {
     if (state->uri) {
         nodelet->url_connected(state->uri->abspath);
     }
 }
-
 
 static void client_teardown(GstRTSPClient *client, GstRTSPContext *state, Image2RTSPNodelet *nodelet) {
     if (state->uri) {
@@ -66,10 +70,9 @@ static void client_teardown(GstRTSPClient *client, GstRTSPContext *state, Image2
     }
 }
 
-
 static void new_client(GstRTSPServer *server, GstRTSPClient *client, Image2RTSPNodelet *nodelet) {
     nodelet->print_info((char *)"New RTSP client");
-    g_signal_connect(client, "options-request", G_CALLBACK(client_options), nodelet);
+    g_signal_connect(client, "play-request", G_CALLBACK(client_play), nodelet);
     g_signal_connect(client, "teardown-request", G_CALLBACK(client_teardown), nodelet);
 }
 
@@ -98,31 +101,31 @@ GstRTSPServer *Image2RTSPNodelet::rtsp_server_create(const std::string& port) {
 
     /* create a server instance */
     server = gst_rtsp_server_new();
-
-  // char *port = (char *) port;
-  g_object_set(server, "service", port.c_str(), NULL);
+    g_object_set(server, "service", port.c_str(), NULL);
 
     /* Optional basic auth and/or TLS. Once a GstRTSPAuth object is installed the
      * server denies any client whose token lacks a role permitted on the factory,
      * so both paths grant AUTH_ROLE on the mounts (see rtsp_server_add_url):
      *   - basic auth on  -> the login mints a token carrying AUTH_ROLE;
      *   - TLS only       -> anonymous clients get AUTH_ROLE via a default token,
-     *                       so the stream stays open but the transport is encrypted. */
+     *                       so the stream stays open but the transport is encrypted.
+     * Security config errors FAIL CLOSED: a server the operator configured as
+     * encrypted/authenticated must not silently come up open. */
     GTlsCertificate *cert = NULL;
-    bool tls_ok = false;
     if (!this->tls_cert_path.empty()) {
         GError *err = NULL;
         cert = g_tls_certificate_new_from_file(this->tls_cert_path.c_str(), &err);
         if (cert == NULL) {
-            NODELET_ERROR("Failed to load TLS certificate '%s': %s. Serving WITHOUT TLS.",
+            NODELET_FATAL("Failed to load TLS certificate '%s': %s. Refusing to start "
+                          "without the encryption this server is configured for.",
                           this->tls_cert_path.c_str(), err ? err->message : "unknown error");
             if (err) g_error_free(err);
-        } else {
-            tls_ok = true;
+            g_object_unref(server);
+            return NULL;
         }
     }
 
-    if (this->auth_enabled || tls_ok) {
+    if (this->auth_enabled || cert != NULL) {
         GstRTSPAuth *auth = gst_rtsp_auth_new();
 
         if (this->auth_enabled) {
@@ -144,7 +147,7 @@ GstRTSPServer *Image2RTSPNodelet::rtsp_server_create(const std::string& port) {
             gst_rtsp_token_unref(def);
         }
 
-        if (tls_ok) {
+        if (cert != NULL) {
             gst_rtsp_auth_set_tls_certificate(auth, cert);
             NODELET_INFO("RTSP TLS enabled (connect via rtsps://) using certificate '%s'.",
                          this->tls_cert_path.c_str());
@@ -152,7 +155,7 @@ GstRTSPServer *Image2RTSPNodelet::rtsp_server_create(const std::string& port) {
 
         gst_rtsp_server_set_auth(server, auth);
         g_object_unref(auth);
-        this->require_factory_role = true;   // mounts must grant AUTH_ROLE (below)
+        this->require_factory_role = true;   // mounts must grant AUTH_ROLE (add_url)
     }
     if (cert) g_object_unref(cert);
 
@@ -160,7 +163,9 @@ GstRTSPServer *Image2RTSPNodelet::rtsp_server_create(const std::string& port) {
     if (gst_rtsp_server_attach(server, NULL) == 0) {
         NODELET_FATAL("Failed to start the RTSP server on port %s - is the port already in "
                       "use (another ros_rtsp / RTSP server still running)? No streams will "
-                      "be reachable.", port.c_str());
+                      "be served.", port.c_str());
+        g_object_unref(server);
+        return NULL;
     }
 
     g_signal_connect(server, "client-connected", G_CALLBACK(new_client), this);
@@ -172,39 +177,47 @@ GstRTSPServer *Image2RTSPNodelet::rtsp_server_create(const std::string& port) {
 }
 
 
-/* fired when a media (RTSP pipeline instance) is torn down. Safety net that also
- * covers clients which vanish without a clean TEARDOWN: release the appsrc and
- * stop the ROS subscription so we don't keep consuming the topic or hold a stale
- * appsrc pointer. */
+/* Fired when a media (one RTSP pipeline instance) is torn down - including for
+ * clients that vanish without a clean TEARDOWN. The nodelet identity-checks the
+ * media pointer so a stale signal can't clobber a newer media's state. */
 static void media_unprepared(GstRTSPMedia *media, MediaCtx *ctx)
 {
     if (ctx && ctx->nodelet)
-        ctx->nodelet->on_media_unprepared(ctx->mount);
+        ctx->nodelet->on_media_unprepared(ctx->mount, media);
 }
 
-/* called when a new media pipeline is constructed. We can query the
- * pipeline and configure our appsrc */
+/* Called when a new media pipeline is constructed (the requesting client has
+ * already passed the auth check at DESCRIBE). Hand the pipeline's elements to
+ * the nodelet - it stores them under its mutex and starts the ROS subscription
+ * for topic streams - then set up the per-media teardown hook. */
 static void media_configure(GstRTSPMediaFactory *factory, GstRTSPMedia *media, MediaCtx *ctx)
-{    if (ctx) {
-        GstElement *pipeline = gst_rtsp_media_get_element(media);
+{
+    if (!ctx || !ctx->nodelet) return;
 
-        *ctx->appsrc = gst_bin_get_by_name(GST_BIN(pipeline), "imagesrc");
+    GstElement *pipeline = gst_rtsp_media_get_element(media);
 
-        /* this instructs appsrc that we will be dealing with timed buffer */
-        gst_util_set_object_arg(G_OBJECT(*ctx->appsrc), "format", "time");
-
-        /* Grab the encoder so its bitrate can be retuned live (dynamic_reconfigure).
-         * register_encoder takes ownership of this ref and applies any active override. */
-        GstElement *enc = gst_bin_get_by_name(GST_BIN(pipeline), params::ENCODER_NAME);
-        ctx->nodelet->register_encoder(ctx->mount, enc);
-
-        gst_object_unref(pipeline);
-
-        /* clean up when this media goes away (covers clients that just vanish) */
-        g_signal_connect(media, "unprepared", G_CALLBACK(media_unprepared), ctx);
+    GstElement *appsrc = NULL;
+    if (ctx->topic_stream) {
+        appsrc = gst_bin_get_by_name(GST_BIN(pipeline), "imagesrc");
+        /* timed buffers; set BEFORE the appsrc is published to imageCallback so
+         * no frame can be pushed while the element is still in bytes format */
+        if (appsrc)
+            gst_util_set_object_arg(G_OBJECT(appsrc), "format", "time");
     }
-    else
-    {
+    /* The encoder is present in every built-in pipeline (topic and cam) and is
+     * NULL with encoder_override unless the user names their element venc0. */
+    GstElement *encoder = gst_bin_get_by_name(GST_BIN(pipeline), params::ENCODER_NAME);
+
+    gst_object_unref(pipeline);
+
+    /* transfers the appsrc/encoder refs to the nodelet (locked in there) */
+    ctx->nodelet->on_media_ready(ctx->mount, media, appsrc, encoder);
+
+    /* clean up when this media goes away (covers clients that just vanish) */
+    g_signal_connect(media, "unprepared", G_CALLBACK(media_unprepared), ctx);
+
+    if (!ctx->topic_stream) {
+        /* cam streams: keep the original multicast address pool configuration */
         guint i, n_streams;
         n_streams = gst_rtsp_media_n_streams (media);
 
@@ -232,7 +245,7 @@ static void media_configure(GstRTSPMediaFactory *factory, GstRTSPMedia *media, M
 }
 
 
-void Image2RTSPNodelet::rtsp_server_add_url(const char *url, const char *sPipeline, GstElement **appsrc) {
+void Image2RTSPNodelet::rtsp_server_add_url(const char *url, const char *sPipeline, bool topic_stream) {
     GstRTSPMountPoints *mounts;
     GstRTSPMediaFactory *factory;
 
@@ -247,17 +260,13 @@ void Image2RTSPNodelet::rtsp_server_add_url(const char *url, const char *sPipeli
     factory = gst_rtsp_media_factory_new();
     gst_rtsp_media_factory_set_launch(factory, sPipeline);
 
-    /* For topic streams (appsrc != NULL) build a context so media-configure can
-     * wire the appsrc and the unprepared cleanup. cam streams pass NULL and take
-     * the multicast-address-pool branch. The context is owned by the factory. */
-    MediaCtx *ctx = NULL;
-    if (appsrc != NULL) {
-        ctx = new MediaCtx();
-        ctx->nodelet = this;
-        ctx->mount   = url;
-        ctx->appsrc  = appsrc;
-        g_object_set_data_full(G_OBJECT(factory), "ros_rtsp_ctx", ctx, media_ctx_free);
-    }
+    /* Context for media-configure/unprepared: which mount, which kind of stream.
+     * Owned by the factory, shared by all of its medias. */
+    MediaCtx *ctx = new MediaCtx();
+    ctx->nodelet      = this;
+    ctx->mount        = url;
+    ctx->topic_stream = topic_stream;
+    g_object_set_data_full(G_OBJECT(factory), "ros_rtsp_ctx", ctx, media_ctx_free);
 
     /* notify when our media is ready, This is called whenever someone asks for
      * the media and a new pipeline is created */

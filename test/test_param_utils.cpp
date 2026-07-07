@@ -76,7 +76,7 @@ TEST(MemberString, DefaultsWhenAbsent) {
     EXPECT_EQ(member_string(s, "missing", "def"), "def");
 }
 
-// ---- payloader_tail ---------------------------------------------------------
+// ---- payloader_tail / is_h265_codec ------------------------------------------
 TEST(PayloaderTail, H264ByDefault) {
     EXPECT_NE(payloader_tail("").find("rtph264pay name=pay0"), std::string::npos);
     EXPECT_NE(payloader_tail("h264").find("h264parse"), std::string::npos);
@@ -84,6 +84,34 @@ TEST(PayloaderTail, H264ByDefault) {
 TEST(PayloaderTail, H265) {
     EXPECT_NE(payloader_tail("h265").find("rtph265pay name=pay0"), std::string::npos);
     EXPECT_NE(payloader_tail("hevc").find("h265parse"), std::string::npos);
+}
+TEST(IsH265Codec, RecognisesAliases) {
+    EXPECT_TRUE(is_h265_codec("h265"));
+    EXPECT_TRUE(is_h265_codec("HEVC"));
+    EXPECT_FALSE(is_h265_codec("h264"));
+    EXPECT_FALSE(is_h265_codec(""));
+}
+
+// ---- encoder keyword helpers --------------------------------------------------
+TEST(KnownEncoder, AcceptsAllAliases) {
+    for (const char* e : {"", "sw", "x264", "x264enc", "x265", "x265enc",
+                          "nvenc", "nv", "nvh264enc", "nvh265enc", "NVENC"})
+        EXPECT_TRUE(is_known_encoder(e)) << e;
+    EXPECT_FALSE(is_known_encoder("magic"));
+    EXPECT_FALSE(is_known_encoder("vaapih264enc"));
+}
+TEST(ImpliedCodec, CodecSpecificKeywordsImplyTheirCodec) {
+    EXPECT_EQ(encoder_implied_codec("nvh265enc"), "h265");
+    EXPECT_EQ(encoder_implied_codec("x265enc"), "h265");
+    EXPECT_EQ(encoder_implied_codec("X265"), "h265");
+    EXPECT_EQ(encoder_implied_codec("nvh264enc"), "h264");
+    EXPECT_EQ(encoder_implied_codec("x264"), "h264");
+}
+TEST(ImpliedCodec, NeutralKeywordsImplyNothing) {
+    EXPECT_EQ(encoder_implied_codec(""), "");
+    EXPECT_EQ(encoder_implied_codec("nvenc"), "");
+    EXPECT_EQ(encoder_implied_codec("sw"), "");
+    EXPECT_EQ(encoder_implied_codec("magic"), "");
 }
 
 // ---- encoder_fragment -------------------------------------------------------
@@ -118,11 +146,25 @@ TEST(EncoderFragment, H265Software) {
     // would otherwise negotiate Y444 and media-prepare fails.
     EXPECT_NE(f.find("format=I420"), std::string::npos);
 }
+TEST(EncoderFragment, X265AliasSelectsX265) {
+    std::string f = encoder_fragment("x265enc", "h265", "500");
+    EXPECT_NE(f.find("x265enc"), std::string::npos);
+    EXPECT_EQ(f.find("nvh265enc"), std::string::npos);
+}
 TEST(EncoderFragment, X264NoForcedI420) {
     // x264's baseline output caps already constrain the input to I420, so we don't
     // add a redundant capsfilter (keeps the working H.264 pipeline unchanged).
     std::string f = encoder_fragment("x264", "h264", "500");
     EXPECT_EQ(f.find("format=I420"), std::string::npos);
+}
+TEST(EncoderFragment, SelfContainedVideoconvert) {
+    // Every fragment must start with videoconvert so cam sources (which feed the
+    // fragment directly, with no caller-side conversion) negotiate a format the
+    // encoder accepts.
+    for (const char* enc : {"x264", "x265", "nvenc"})
+        for (const char* codec : {"h264", "h265"})
+            EXPECT_EQ(encoder_fragment(enc, codec, "500").rfind("videoconvert ! ", 0), 0u)
+                << enc << "/" << codec;
 }
 TEST(EncoderFragment, H265Nvenc) {
     std::string f = encoder_fragment("nvenc", "hevc", "500");

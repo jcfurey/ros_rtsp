@@ -51,27 +51,54 @@ std::string normalize_mountpoint(const std::string& raw) {
     return mp;
 }
 
-static bool is_h265(const std::string& codec) {
+bool is_h265_codec(const std::string& codec) {
     std::string c = lower(codec);
     return c == "h265" || c == "hevc";
 }
 
 std::string payloader_tail(const std::string& codec) {
-    if (is_h265(codec))
+    if (is_h265_codec(codec))
         return " ! h265parse ! rtph265pay name=pay0 pt=96 config-interval=1 )";
     return " ! h264parse ! rtph264pay name=pay0 pt=96 config-interval=1 )";
+}
+
+/* Alias sets. These three helpers are the ONLY place encoder keywords are
+ * interpreted; is_known_encoder and encoder_fragment share them so the
+ * "unknown encoder" warning can never disagree with the pipeline actually built. */
+static bool is_nv_encoder(const std::string& enc_lower) {
+    return enc_lower == "nvenc" || enc_lower == "nv" ||
+           enc_lower == "nvh264enc" || enc_lower == "nvh265enc";
+}
+static bool is_sw_encoder(const std::string& enc_lower) {
+    return enc_lower.empty() || enc_lower == "sw" ||
+           enc_lower == "x264" || enc_lower == "x264enc" ||
+           enc_lower == "x265" || enc_lower == "x265enc";
+}
+
+bool is_known_encoder(const std::string& encoder) {
+    std::string e = lower(encoder);
+    return is_nv_encoder(e) || is_sw_encoder(e);
+}
+
+std::string encoder_implied_codec(const std::string& encoder) {
+    std::string e = lower(encoder);
+    if (e == "nvh265enc" || e == "x265" || e == "x265enc") return "h265";
+    if (e == "nvh264enc" || e == "x264" || e == "x264enc") return "h264";
+    return "";   // codec-neutral (nvenc, nv, sw, empty, unknown)
 }
 
 std::string encoder_fragment(const std::string& encoder, const std::string& codec,
                              const std::string& bitrate) {
     std::string enc = lower(encoder.empty() ? "x264" : encoder);
-    bool h265 = is_h265(codec);
+    bool h265 = is_h265_codec(codec);
     std::string out_caps = h265 ? "video/x-h265" : "video/x-h264, profile=baseline";
 
     // The encoder element is named ENCODER_NAME so the running nodelet can grab it
     // (gst_bin_get_by_name) and retune its "bitrate" property live via dynamic_reconfigure.
-    bool nv = (enc == "nvenc" || enc == "nv" || enc == "nvh264enc" || enc == "nvh265enc");
-    if (nv) {
+    // Every fragment starts with its own videoconvert: cam sources feed the fragment
+    // directly (no caller-side conversion), and for topic streams the extra convert
+    // negotiates passthrough, so it costs nothing.
+    if (is_nv_encoder(enc)) {
         std::string el = h265 ? "nvh265enc" : "nvh264enc";
         return "videoconvert ! " + el + " name=" + ENCODER_NAME + " bitrate=" + bitrate +
                " gop-size=30 rc-mode=cbr preset=low-latency-hq ! " + out_caps;
@@ -79,14 +106,14 @@ std::string encoder_fragment(const std::string& encoder, const std::string& code
 
     // software x264 / x265 (both take tune=zerolatency, bitrate in kbit/sec, key-int-max)
     std::string el = h265 ? "x265enc" : "x264enc";
-    // x265enc advertises both I420 and Y444 input; the upstream videoconvert may pick
+    // x265enc advertises both I420 and Y444 input; a free-running videoconvert may pick
     // Y444, which the default (main) profile can't encode ("Failed to find correct
     // level, tier or profile in VPS") and media-prepare fails. Pin I420 so the main
     // profile is always valid. x264's baseline output caps already force I420 upstream,
     // so it needs no extra filter.
     std::string in_caps = h265 ? "video/x-raw,format=I420 ! " : "";
-    return in_caps + el + " name=" + ENCODER_NAME + " tune=zerolatency bitrate=" + bitrate +
-           " key-int-max=30 ! " + out_caps;
+    return "videoconvert ! " + in_caps + el + " name=" + ENCODER_NAME +
+           " tune=zerolatency bitrate=" + bitrate + " key-int-max=30 ! " + out_caps;
 }
 
 }  // namespace params

@@ -3,6 +3,8 @@ port: "8554"
 
 # Optional: require a username/password on every stream (basic auth). Omit for
 # open access. When set, clients connect as rtsp://user:pass@<ip>:8554/<mount>.
+# Fail-closed: a malformed auth/tls block (missing user / missing or unloadable
+# cert) stops the node with a FATAL log instead of serving unprotected.
 #auth:
 #  user: myuser
 #  pass: mysecret
@@ -38,8 +40,11 @@ streams: # Cannot rename - must leave this as is.
     bitrate: 800            # encoder target, kbit/s (default: 500)
     codec: h264             # h264 (default) or h265/hevc
     encoder: x264           # x264 (default, software) or nvenc (NVIDIA GPU)
-    framerate: 15           # fps advertised to the encoder (default: 10)
-    caps: video/x-raw,framerate=10/1,width=640,height=480  # optional: rescale / cap framerate
+    framerate: 15           # fps the source topic delivers (default: 10)
+    # Optional 'caps': rescale and/or cap the framerate before encoding. videorate +
+    # videoscale are inserted automatically, so these values may differ from the
+    # incoming topic (here: 15 fps in, downsampled to 10 fps on the wire).
+    caps: video/x-raw,framerate=10/1,width=640,height=480
 
   # A non-ROS GStreamer source (e.g. a v4l2 camera) encoded and served directly.
   usbcam:

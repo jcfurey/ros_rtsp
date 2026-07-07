@@ -78,8 +78,10 @@ streams:
     bitrate: 800           # encoder target, kbit/s (default: 500)
     codec: h264            # h264 (default) or h265/hevc. See below.
     encoder: nvenc         # x264 (default, software) or nvenc (NVIDIA hardware). See below.
-    framerate: 15          # fps advertised to the encoder (default: 10)
+    framerate: 15          # fps the source topic delivers / appsrc advertises (default: 10)
     caps: video/x-raw,framerate=10/1,width=640,height=480  # optional: rescale / cap framerate
+    # 'caps' inserts videorate + videoscale, so its framerate/size may differ from
+    # the incoming topic (here: 15 fps in, downsampled to 10 fps on the wire).
 
   # A non-ROS GStreamer source (e.g. a v4l2 camera) served directly
   usbcam:
@@ -96,7 +98,7 @@ Each stream picks its codec with the optional `codec` parameter:
 - `codec: h264` — H.264 / AVC (default). Widest client support.
 - `codec: h265` (or `hevc`) — H.265 / HEVC. ~Half the bitrate for the same quality, at higher CPU cost; make sure your client can decode it (`rtph265depay ! h265parse ! avdec_h265`).
 
-`codec` and `encoder` combine: software uses `x264enc`/`x265enc`, `nvenc` uses `nvh264enc`/`nvh265enc`.
+`codec` and `encoder` combine: software uses `x264enc`/`x265enc`, `nvenc` uses `nvh264enc`/`nvh265enc`. A codec-specific encoder keyword implies its codec, so `encoder: nvh265enc` (or `x265`) alone gets you H.265 without also writing `codec: h265`; an explicit mismatch between the two logs a warning and `codec` wins.
 
 ## Hardware acceleration (NVENC)
 Encoding is the most CPU-hungry part of the pipeline. Each stream can pick its encoder with the optional `encoder` parameter:
@@ -128,6 +130,11 @@ streams:
 - **`tls` only** — connect with `rtsps://<ip>:8554/<mount>`; the link is encrypted, no login required.
 - **`auth` + `tls`** — encrypted *and* authenticated (recommended).
 
+Both settings **fail closed**: an `auth` block without a usable `user`, a `tls`
+block without a `cert`, or a certificate that fails to load stops the node with
+a `FATAL` log instead of silently serving an open/unencrypted stream you
+configured to be protected.
+
 Generate a self-signed certificate for testing:
 ```bash
 openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out crt.pem \
@@ -141,30 +148,33 @@ gst-launch-1.0 rtspsrc location=rtsps://user:pass@127.0.0.1:8554/front \
 ```
 
 ## Live bitrate tuning
-Every stream's encoder bitrate can be changed at runtime with `dynamic_reconfigure`
-— no restart, no reconnect. Open `rqt_reconfigure`:
+Every stream's encoder bitrate — `topic` and `cam` streams alike — can be changed
+at runtime with `dynamic_reconfigure`, no restart, no reconnect. Open `rqt_reconfigure`:
 ```bash
 rosrun rqt_reconfigure rqt_reconfigure
 ```
-or from the command line:
+or from the command line (the node is named `Image2RTSPNodelet` by the built-in
+launch file; adjust if you renamed it):
 ```bash
-rosrun dynamic_reconfigure dynparam set /rtsp_nodelet_manager/image2rtsp bitrate 3000
+rosrun dynamic_reconfigure dynparam set /Image2RTSPNodelet bitrate 3000
 ```
 `bitrate` is in kbit/s and applies to **all** currently-streaming encoders at once.
-The default `0` means *"leave each stream at its configured bitrate"*, so simply
-opening `rqt_reconfigure` never clobbers your per-stream YAML values — set a positive
-value to override, set it back to `0` conceptually by restarting to return to config.
+The default `0` means *"use each stream's configured bitrate"*: opening
+`rqt_reconfigure` never clobbers your per-stream YAML values, and setting the value
+back to `0` restores them on every live encoder. (Streams using `encoder_override`
+are only covered if the override names its encoder element `venc0`.)
 
 ## Diagnostics
 While running, the node publishes a `diagnostic_msgs/DiagnosticArray` on `/diagnostics`
-at 1 Hz — one status per topic stream, so you can see client counts and whether frames
+at 1 Hz — one status per stream, so you can see client counts and whether frames
 are actually flowing:
 ```bash
 rostopic echo /diagnostics        # or: rosrun rqt_robot_monitor rqt_robot_monitor
 ```
-Each status reports `OK` (idle or streaming) or `WARN` (a client is connected but no
-frames are arriving — usually nothing is publishing the source topic), plus key/values
-for `source_topic`, `clients`, `publishers`, `receiving`, `codec` and `framerate`.
+Each status reports `OK` (idle or streaming) or `WARN` (media is up but no frames
+are arriving — usually nothing is publishing the source topic), plus key/values for
+`type`, `source`, `clients`, `codec`, and for topic streams `publishers`, `receiving`
+and `framerate`.
 
 For any other hardware encoder (Intel/AMD VA-API, Jetson `nvv4l2h264enc`, ...) set `encoder_override` to the full encoder + output-caps fragment and it is used verbatim:
 ```yaml
