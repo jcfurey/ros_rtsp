@@ -4,11 +4,14 @@
        roslaunch ros_rtsp rtsp_streams.launch config:=/abs/path/to/my_streams.yaml -->
   <arg name="config" default="$(find ros_rtsp)/config/stream_setup.yaml" />
 
-  <!-- Nodelet manager. By default a standalone manager is started to host the RTSP
-       server. To load into an existing manager (e.g. your camera driver's) for
+  <!-- Nodelet manager. A dedicated manager is started by default. The name is
+       intentionally unique ("rtsp_nodelet_manager", not the very common
+       "standalone_nodelet") so it can't clash with another manager on the system
+       - a name clash makes ROS shut one of them down, taking the RTSP server with
+       it. To load into an existing manager (e.g. your camera driver's) for
        zero-copy image transport on `topic` streams:
        roslaunch ros_rtsp rtsp_streams.launch start_manager:=false manager:=<existing_manager> -->
-  <arg name="manager" default="standalone_nodelet" />
+  <arg name="manager" default="rtsp_nodelet_manager" />
   <arg name="start_manager" default="true" />
 
   <!-- Start the RTSP server (nodelet manager process) -->

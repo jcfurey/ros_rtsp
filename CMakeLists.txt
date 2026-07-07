@@ -21,6 +21,8 @@ find_package(catkin REQUIRED COMPONENTS
   roscpp
   sensor_msgs
   nodelet
+  diagnostic_msgs
+  dynamic_reconfigure
 )
 
 ## System dependencies are found with CMake's conventions
@@ -98,10 +100,9 @@ find_package(catkin REQUIRED COMPONENTS
 ##     and list every .cfg file to be processed
 
 ## Generate dynamic reconfigure parameters in the 'cfg' folder
-# generate_dynamic_reconfigure_options(
-#   cfg/DynReconf1.cfg
-#   cfg/DynReconf2.cfg
-# )
+generate_dynamic_reconfigure_options(
+  cfg/Bitrate.cfg
+)
 
 ###################################
 ## catkin specific configuration ##
@@ -115,7 +116,7 @@ find_package(catkin REQUIRED COMPONENTS
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES ros_rtsp
- CATKIN_DEPENDS roscpp sensor_msgs
+ CATKIN_DEPENDS roscpp sensor_msgs diagnostic_msgs
 #  DEPENDS system_lib
 )
 
@@ -135,13 +136,14 @@ include_directories(
 # add_library(${PROJECT_NAME}
 #   src/${PROJECT_NAME}/ros_rtsp.cpp
 # )
-add_library(image_to_rtsp_nodelet src/image2rtsp.cpp src/video.cpp)
+# Library name is package-specific (not the generic "image_to_rtsp_nodelet") so
+# the .so can't collide with another package that builds a like-named library.
+add_library(ros_rtsp_nodelet src/image2rtsp.cpp src/video.cpp src/param_utils.cpp)
 
 
-## Add cmake target dependencies of the library
-## as an example, code may need to be generated before libraries
-## either from message generation or dynamic reconfigure
-# add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+## The dynamic_reconfigure Bitrate config header must be generated before we
+## compile the nodelet (image2rtsp.cpp includes ros_rtsp/BitrateConfig.h).
+add_dependencies(ros_rtsp_nodelet ${PROJECT_NAME}_gencfg ${catkin_EXPORTED_TARGETS})
 
 ## Declare a C++ executable
 ## With catkin_make all packages are built within a single CMake context
@@ -157,9 +159,9 @@ add_library(image_to_rtsp_nodelet src/image2rtsp.cpp src/video.cpp)
 ## same as for the library above
 
 ## Specify libraries to link a library or executable target against
-target_link_libraries(image_to_rtsp_nodelet 
-  ${catkin_LIBRARIES} 
-  ${GST_LIBRARIES} 
+target_link_libraries(ros_rtsp_nodelet
+  ${catkin_LIBRARIES}
+  ${GST_LIBRARIES}
 )
 
 
@@ -170,7 +172,7 @@ target_link_libraries(image_to_rtsp_nodelet
 # all install targets should use catkin DESTINATION variables
 # See http://ros.org/doc/api/catkin/html/adv_user_guide/variables.html
 
-install(TARGETS image_to_rtsp_nodelet
+install(TARGETS ros_rtsp_nodelet
         LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
 )
 
@@ -179,7 +181,7 @@ install(DIRECTORY include/
         FILES_MATCHING PATTERN "*.h"
 )
 
-install(DIRECTORY launch config
+install(DIRECTORY launch config cfg
 	DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
 
@@ -191,11 +193,11 @@ install(FILES nodelet_plugins.xml
 ## Testing ##
 #############
 
-## Add gtest based cpp test target and link libraries
-# catkin_add_gtest(${PROJECT_NAME}-test test/test_ros_rtsp.cpp)
-# if(TARGET ${PROJECT_NAME}-test)
-#   target_link_libraries(${PROJECT_NAME}-test ${PROJECT_NAME})
-# endif()
-
-## Add folders to be run by python nosetests
-# catkin_add_nosetests(test)
+## Unit tests for the pure config/pipeline helpers (no ROS/GStreamer runtime).
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(test_param_utils test/test_param_utils.cpp src/param_utils.cpp)
+  if(TARGET test_param_utils)
+    target_include_directories(test_param_utils PRIVATE include)
+    target_link_libraries(test_param_utils ${catkin_LIBRARIES})
+  endif()
+endif()
