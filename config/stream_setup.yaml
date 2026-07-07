@@ -1,12 +1,29 @@
 # Set up your streams to rtsp here.
 port: "8554"
+
+# Optional: require a username/password on every stream (basic auth). Omit for
+# open access. When set, clients connect as rtsp://user:pass@<ip>:8554/<mount>.
+#auth:
+#  user: myuser
+#  pass: mysecret
+
+# Optional: serve over TLS (rtsps://). 'cert' is a PEM file holding the server
+# certificate AND its private key. Combine with 'auth' above for encrypted +
+# authenticated streaming. Generate a self-signed test cert with:
+#   openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out crt.pem \
+#     -days 365 -subj "/CN=localhost" && cat crt.pem key.pem > cert.pem
+#tls:
+#  cert: /path/to/cert.pem
+
 streams: # Cannot rename - must leave this as is.
 
   # Minimal: point at a ROS Image topic and serve it as an encoded RTSP stream.
   # Only 'type' and 'source' are required. Everything else has a sensible default:
   #   mountpoint -> "/<stream name>"   (here: /backcam)
   #   bitrate    -> 500 kbit/s
+  #   codec      -> h264
   #   encoder    -> x264 (software)
+  #   framerate  -> 10 fps (advertised to the encoder for topic streams)
   #   caps       -> none: the topic is served at its native resolution
   backcam:
     type: topic
@@ -18,8 +35,10 @@ streams: # Cannot rename - must leave this as is.
     type: topic
     source: /usb_cam1/image_raw
     mountpoint: /front      # RTSP path (default: /<stream name>)
-    bitrate: 800            # H.264 target, kbit/s (default: 500)
+    bitrate: 800            # encoder target, kbit/s (default: 500)
+    codec: h264             # h264 (default) or h265/hevc
     encoder: x264           # x264 (default, software) or nvenc (NVIDIA GPU)
+    framerate: 15           # fps advertised to the encoder (default: 10)
     caps: video/x-raw,framerate=10/1,width=640,height=480  # optional: rescale / cap framerate
 
   # A non-ROS GStreamer source (e.g. a v4l2 camera) encoded and served directly.

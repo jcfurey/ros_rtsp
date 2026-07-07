@@ -13,45 +13,16 @@
 #include <boost/bind/bind.hpp>
 #include "sensor_msgs/Image.h"
 #include <sensor_msgs/image_encodings.h>
+#include <diagnostic_msgs/DiagnosticArray.h>
 #include <image2rtsp.h>
+#include <image2rtsp/param_utils.h>
 
 
 using namespace std;
 using namespace image2rtsp;
 
-
-/* ---- tolerant parameter helpers -------------------------------------------
- * The config comes from YAML via XmlRpc, where "500" (string), 500 (int) and
- * 500.0 (double) are distinct types. The original code used static_cast<>, which
- * throws on a type mismatch and aborted the whole nodelet. These helpers accept
- * whatever the user wrote so one stray quote can't break everything. */
-static std::string xmlrpc_to_string(XmlRpc::XmlRpcValue& v) {
-    switch (v.getType()) {
-        case XmlRpc::XmlRpcValue::TypeString:  return static_cast<std::string>(v);
-        case XmlRpc::XmlRpcValue::TypeInt:     return std::to_string(static_cast<int>(v));
-        case XmlRpc::XmlRpcValue::TypeBoolean: return static_cast<bool>(v) ? "true" : "false";
-        case XmlRpc::XmlRpcValue::TypeDouble: {
-            std::ostringstream o; o << static_cast<double>(v); return o.str();
-        }
-        default: return "";
-    }
-}
-
-static std::string member_string(XmlRpc::XmlRpcValue& stream, const char* key, const std::string& def="") {
-    return stream.hasMember(key) ? xmlrpc_to_string(stream[key]) : def;
-}
-
-static int member_int(XmlRpc::XmlRpcValue& stream, const char* key, int def) {
-    if (!stream.hasMember(key)) return def;
-    XmlRpc::XmlRpcValue& v = stream[key];
-    switch (v.getType()) {
-        case XmlRpc::XmlRpcValue::TypeInt:    return static_cast<int>(v);
-        case XmlRpc::XmlRpcValue::TypeDouble: return static_cast<int>(static_cast<double>(v));
-        case XmlRpc::XmlRpcValue::TypeString:
-            try { return std::stoi(static_cast<std::string>(v)); } catch (...) { return def; }
-        default: return def;
-    }
-}
+// Tolerant parameter + pipeline helpers live in param_utils (unit-tested).
+namespace pu = image2rtsp::params;
 
 /* Is a topic currently advertised on the ROS graph? Used only for a friendly
  * startup warning - a topic may still appear later, so this never blocks a stream. */
@@ -65,10 +36,6 @@ static bool topic_is_advertised(const std::string& topic) {
 
 
 void Image2RTSPNodelet::onInit() {
-    // Common tail shared by every stream. h264parse + config-interval makes the
-    // encoded SPS/PPS available to clients that connect mid-stream (shared factory).
-    const string pipeline_tail = " ! h264parse ! rtph264pay name=pay0 pt=96 config-interval=1 )";
-
     NODELET_INFO("Initializing image2rtsp nodelet...");
 
     if (getenv((char*)"GST_DEBUG") == NULL) {
@@ -83,9 +50,32 @@ void Image2RTSPNodelet::onInit() {
     if (nh.hasParam("port")) {
         XmlRpc::XmlRpcValue p;
         nh.getParam("port", p);
-        std::string s = xmlrpc_to_string(p);
+        std::string s = pu::to_string(p);
         if (!s.empty()) this->port = s;
     }
+
+    // Optional auth / TLS (applies to the whole server). Both are off unless set.
+    //   auth: { user: <name>, pass: <secret> }   -> require basic auth on every mount
+    //   tls:  { cert: <path-to-PEM> }            -> serve rtsps:// (cert PEM holds cert+key)
+    if (nh.hasParam("auth")) {
+        XmlRpc::XmlRpcValue a;
+        nh.getParam("auth", a);
+        if (a.getType() == XmlRpc::XmlRpcValue::TypeStruct) {
+            auth_user = pu::member_string(a, "user");
+            auth_pass = pu::member_string(a, "pass");
+        } else {
+            NODELET_WARN("'auth' parameter is not a mapping (expected {user, pass}) - ignoring.");
+        }
+    }
+    if (nh.hasParam("tls")) {
+        XmlRpc::XmlRpcValue t;
+        nh.getParam("tls", t);
+        if (t.getType() == XmlRpc::XmlRpcValue::TypeStruct)
+            tls_cert_path = pu::member_string(t, "cert");
+        else
+            NODELET_WARN("'tls' parameter is not a mapping (expected {cert}) - ignoring.");
+    }
+    auth_enabled = !auth_user.empty();
 
     // streams: must be a mapping. If it isn't there, say so clearly and stop -
     // do NOT ROS_ASSERT (that would abort the whole nodelet manager).
@@ -113,23 +103,25 @@ void Image2RTSPNodelet::onInit() {
                 continue;
             }
 
-            std::string type       = member_string(stream, "type");
+            std::string type       = pu::member_string(stream, "type");
             std::string mountpoint  = stream_mountpoint(stream, name);
-            std::string bitrate     = std::to_string(member_int(stream, "bitrate", 500));
-            std::string encoder     = build_encoder(stream, bitrate);
+            std::string bitrate     = std::to_string(pu::member_int(stream, "bitrate", 500));
+            std::string codec       = pu::member_string(stream, "codec", "h264");
+            std::string encoder     = build_encoder(stream, bitrate);   // reads codec too
+            std::string tail        = pu::payloader_tail(codec);
             std::string pipeline;
 
             if (type == "cam") {
-                std::string source = member_string(stream, "source");
+                std::string source = pu::member_string(stream, "source");
                 if (source.empty()) {
                     NODELET_ERROR("Stream '%s' (cam) has no 'source' - skipping.", name.c_str());
                     continue;
                 }
-                pipeline = "( " + source + " ! " + encoder + pipeline_tail;
+                pipeline = "( " + source + " ! " + encoder + tail;
                 rtsp_server_add_url(mountpoint.c_str(), pipeline.c_str(), NULL);
             }
             else if (type == "topic") {
-                std::string source = member_string(stream, "source");
+                std::string source = pu::member_string(stream, "source");
                 if (source.empty()) {
                     NODELET_ERROR("Stream '%s' (topic) has no 'source' topic - skipping.", name.c_str());
                     continue;
@@ -146,6 +138,9 @@ void Image2RTSPNodelet::onInit() {
                     appsrc[mountpoint] = NULL;
                     topic_source[mountpoint] = source;
                     receiving[mountpoint] = false;
+                    stream_codec[mountpoint] = codec;
+                    // Advertised framerate for the appsrc caps (default 10 fps).
+                    framerate[mountpoint] = pu::member_int(stream, "framerate", 10);
                 }
 
                 /* Optional 'caps': when set, rescale / cap the framerate before encoding.
@@ -153,10 +148,10 @@ void Image2RTSPNodelet::onInit() {
                  * from the incoming sensor_msgs/Image itself. */
                 std::string scale = "";
                 if (stream.hasMember("caps"))
-                    scale = "videoscale ! " + xmlrpc_to_string(stream["caps"]) + " ! ";
+                    scale = "videoscale ! " + pu::to_string(stream["caps"]) + " ! ";
 
                 pipeline = "( appsrc name=imagesrc do-timestamp=true min-latency=0 max-latency=0 "
-                           "max-bytes=1000 is-live=true ! videoconvert ! " + scale + encoder + pipeline_tail;
+                           "max-bytes=1000 is-live=true ! videoconvert ! " + scale + encoder + tail;
                 rtsp_server_add_url(mountpoint.c_str(), pipeline.c_str(), (GstElement **)&(appsrc[mountpoint]));
             }
             else {
@@ -187,8 +182,70 @@ void Image2RTSPNodelet::onInit() {
 
     // Watchdog: while a client is connected, periodically warn if the source topic
     // has no publisher, so an unreachable/mistyped topic is obvious in the log.
-    if (!topic_source.empty())
-        watchdog = nh.createTimer(ros::Duration(5.0), &Image2RTSPNodelet::checkTopics, this);
+    // Also publish per-stream status on /diagnostics so `rostopic echo /diagnostics`
+    // or rqt_robot_monitor shows client counts and whether frames are flowing.
+    if (!topic_source.empty()) {
+        watchdog   = nh.createTimer(ros::Duration(5.0), &Image2RTSPNodelet::checkTopics, this);
+        diag_pub   = getNodeHandle().advertise<diagnostic_msgs::DiagnosticArray>("/diagnostics", 1);
+        diag_timer = nh.createTimer(ros::Duration(1.0), &Image2RTSPNodelet::publishDiagnostics, this);
+
+        // Live bitrate tuning (rqt_reconfigure). The server fires the callback once
+        // with the default (bitrate=0 = keep configured bitrate), so this does not
+        // clobber the per-stream YAML values until a client actually changes it.
+        dyn_srv.reset(new dynamic_reconfigure::Server<ros_rtsp::BitrateConfig>(nh));
+        dyn_srv->setCallback(boost::bind(&Image2RTSPNodelet::reconfigure, this,
+                                         boost::placeholders::_1, boost::placeholders::_2));
+    }
+}
+
+/* Publish one diagnostic_msgs/DiagnosticStatus per topic stream on /diagnostics
+ * (1 Hz). Level is OK when idle or actively streaming, WARN when a client is
+ * connected but no frames are arriving (typically no publisher on the source). */
+void Image2RTSPNodelet::publishDiagnostics(const ros::TimerEvent&) {
+    diagnostic_msgs::DiagnosticArray arr;
+    arr.header.stamp = ros::Time::now();
+
+    std::lock_guard<std::mutex> lk(mtx);
+    for (std::map<std::string, std::string>::const_iterator it = topic_source.begin();
+         it != topic_source.end(); ++it) {
+        const std::string& mount  = it->first;
+        const std::string& source = it->second;
+        int clients = num_of_clients.count(mount) ? num_of_clients[mount] : 0;
+        bool recv   = receiving.count(mount) ? receiving[mount] : false;
+        int pubs = 0;
+        std::map<std::string, ros::Subscriber>::const_iterator s = subs.find(mount);
+        if (s != subs.end()) pubs = s->second.getNumPublishers();
+
+        diagnostic_msgs::DiagnosticStatus st;
+        st.name = "ros_rtsp: " + mount;
+        st.hardware_id = source;
+        if (clients <= 0) {
+            st.level = diagnostic_msgs::DiagnosticStatus::OK;
+            st.message = "idle (no clients connected)";
+        } else if (recv) {
+            st.level = diagnostic_msgs::DiagnosticStatus::OK;
+            st.message = "streaming to " + std::to_string(clients) + " client(s)";
+        } else if (pubs == 0) {
+            st.level = diagnostic_msgs::DiagnosticStatus::WARN;
+            st.message = std::to_string(clients) + " client(s) connected, no publisher on '" + source + "'";
+        } else {
+            st.level = diagnostic_msgs::DiagnosticStatus::WARN;
+            st.message = std::to_string(clients) + " client(s) connected, waiting for frames";
+        }
+
+        auto kv = [&st](const std::string& k, const std::string& v) {
+            diagnostic_msgs::KeyValue p; p.key = k; p.value = v; st.values.push_back(p);
+        };
+        kv("source_topic", source);
+        kv("clients", std::to_string(clients));
+        kv("publishers", std::to_string(pubs));
+        kv("receiving", recv ? "true" : "false");
+        kv("codec", stream_codec.count(mount) ? stream_codec[mount] : "h264");
+        kv("framerate", std::to_string(framerate.count(mount) ? framerate[mount] : 10));
+        kv("mountpoint", mount);
+        arr.status.push_back(st);
+    }
+    diag_pub.publish(arr);
 }
 
 /* Periodic check: for every topic stream that currently has a client, warn (throttled)
@@ -218,57 +275,36 @@ void Image2RTSPNodelet::checkTopics(const ros::TimerEvent&) {
  * factory for path ..."). So normalise here: strip whitespace, turn backslashes
  * into forward slashes, and guarantee a single leading '/'. */
 std::string Image2RTSPNodelet::stream_mountpoint(XmlRpc::XmlRpcValue& stream, const std::string& name) {
-    std::string mp = stream.hasMember("mountpoint") ? xmlrpc_to_string(stream["mountpoint"]) : name;
-    std::replace(mp.begin(), mp.end(), '\\', '/');
-    size_t a = mp.find_first_not_of(" \t\r\n");
-    size_t b = mp.find_last_not_of(" \t\r\n");
-    mp = (a == std::string::npos) ? "" : mp.substr(a, b - a + 1);
-    if (mp.empty() || mp.front() != '/')
-        mp = "/" + mp;
-    return mp;
+    std::string raw = stream.hasMember("mountpoint") ? pu::to_string(stream["mountpoint"]) : name;
+    return pu::normalize_mountpoint(raw);
 }
 
-/* Build the GStreamer encoder fragment for a stream (encoder element through the
- * output caps, i.e. everything between the raw-video source and rtph264pay).
- *
- * Selected with the optional per-stream parameters:
- *   encoder: x264   (default) - software H.264, works everywhere, no GPU required
- *   encoder: nvenc            - NVIDIA hardware H.264 (gst-plugins-bad "nvcodec", nvh264enc)
- *   encoder_override: "..."   - full custom encoder+caps fragment, used verbatim
- *                               (for VA-API, Jetson nvv4l2h264enc, etc.)
- *
- * bitrate is forwarded unchanged in kbit/sec, matching both x264enc and nvh264enc.
- */
+/* Build the encoder+caps fragment for a stream. Selected with the optional
+ * per-stream parameters:
+ *   encoder: x264 (default) | nvenc      - software / NVIDIA hardware
+ *   codec:   h264 (default) | h265        - H.264 or H.265/HEVC
+ *   encoder_override: "..."               - full custom encoder+caps, used verbatim
+ * The actual pipeline strings live in the unit-tested params::encoder_fragment. */
 std::string Image2RTSPNodelet::build_encoder(XmlRpc::XmlRpcValue& stream, const std::string& bitrate) {
-    // Full manual override wins: the user supplies the whole encoder + caps fragment.
-    if (stream.hasMember("encoder_override")) {
-        return xmlrpc_to_string(stream["encoder_override"]);
-    }
+    if (stream.hasMember("encoder_override"))
+        return pu::to_string(stream["encoder_override"]);
 
-    std::string encoder = member_string(stream, "encoder", "x264");
-    std::transform(encoder.begin(), encoder.end(), encoder.begin(),
-                   [](unsigned char c){ return std::tolower(c); });
+    std::string encoder = pu::member_string(stream, "encoder", "x264");
+    std::string codec   = pu::member_string(stream, "codec", "h264");
 
-    if (encoder == "nvenc" || encoder == "nvh264enc" || encoder == "nv") {
-        // NVIDIA desktop hardware encoder. videoconvert guarantees an input format
-        // nvenc accepts; bitrate stays in kbit/sec.
-        NODELET_INFO("Using NVIDIA hardware encoder (nvh264enc)");
-        return "videoconvert ! nvh264enc bitrate=" + bitrate +
-               " gop-size=30 rc-mode=cbr preset=low-latency-hq ! video/x-h264, profile=baseline";
-    }
+    std::string e = encoder;
+    std::transform(e.begin(), e.end(), e.begin(), [](unsigned char c){ return std::tolower(c); });
+    bool known = (e=="x264" || e=="x264enc" || e=="sw" ||
+                  e=="nvenc" || e=="nv" || e=="nvh264enc" || e=="nvh265enc");
+    if (!known)
+        NODELET_WARN("Unknown encoder '%s' - falling back to software. Use 'encoder_override' "
+                     "for a fully custom pipeline.", encoder.c_str());
 
-    if (encoder != "x264" && encoder != "x264enc" && encoder != "sw") {
-        NODELET_WARN("Unknown encoder '%s', falling back to software x264. "
-                     "Use 'encoder_override' for a fully custom pipeline.", encoder.c_str());
-    }
-
-    // Default: software x264 (identical to the original pipeline).
-    return "x264enc tune=zerolatency bitrate=" + bitrate +
-           " key-int-max=30 ! video/x-h264, profile=baseline";
+    return pu::encoder_fragment(encoder, codec, bitrate);
 }
 
 /* Modified from https://github.com/ProjectArtemis/gst_video_server/blob/master/src/server_nodelet.cpp */
-GstCaps* Image2RTSPNodelet::gst_caps_new_from_image(const sensor_msgs::Image::ConstPtr &msg)
+GstCaps* Image2RTSPNodelet::gst_caps_new_from_image(const sensor_msgs::Image::ConstPtr &msg, int fps)
 {
     // http://gstreamer.freedesktop.org/data/doc/gstreamer/head/pwg/html/section-types-definitions.html
     static const ros::M_string known_formats = {{
@@ -300,7 +336,7 @@ GstCaps* Image2RTSPNodelet::gst_caps_new_from_image(const sensor_msgs::Image::Co
             "format", G_TYPE_STRING, format->second.c_str(),
             "width", G_TYPE_INT, msg->width,
             "height", G_TYPE_INT, msg->height,
-            "framerate", GST_TYPE_FRACTION, 10, 1,
+            "framerate", GST_TYPE_FRACTION, fps, 1,
             nullptr);
 }
 
@@ -312,7 +348,8 @@ void Image2RTSPNodelet::imageCallback(const sensor_msgs::Image::ConstPtr& msg, c
     if (appsrc[topic] == NULL)
         return;
 
-    GstCaps *caps = gst_caps_new_from_image(msg);
+    int fps = framerate.count(topic) ? framerate[topic] : 10;
+    GstCaps *caps = gst_caps_new_from_image(msg, fps);
     if (caps == NULL)   // unsupported encoding / big-endian (already logged, throttled)
         return;
 
@@ -354,9 +391,9 @@ void Image2RTSPNodelet::url_connected(string url) {
             XmlRpc::XmlRpcValue stream = streams[it->first];
             if (stream.getType() != XmlRpc::XmlRpcValue::TypeStruct) continue;
 
-            std::string type       = member_string(stream, "type");
+            std::string type       = pu::member_string(stream, "type");
             std::string mountpoint = stream_mountpoint(stream, it->first);
-            std::string source     = member_string(stream, "source");
+            std::string source     = pu::member_string(stream, "source");
 
             if (type == "topic" && url == mountpoint && !source.empty()) {
                 std::lock_guard<std::mutex> lk(mtx);
@@ -422,11 +459,55 @@ void Image2RTSPNodelet::on_media_unprepared(const std::string& mount) {
         gst_object_unref(a->second);   // release the ref from gst_bin_get_by_name()
         a->second = NULL;
     }
+    std::map<std::string, GstElement*>::iterator e = encoders.find(mount);
+    if (e != encoders.end() && e->second != NULL) {
+        gst_object_unref(e->second);   // release the encoder ref taken in register_encoder
+        e->second = NULL;
+    }
     num_of_clients[mount] = 0;
     receiving[mount] = false;
     std::map<std::string, ros::Subscriber>::iterator s = subs.find(mount);
     if (s != subs.end()) s->second.shutdown();
     NODELET_INFO("Stream %s: RTSP media released; source subscription stopped.", mount.c_str());
+}
+
+/* Called (on the GStreamer thread) from media_configure with the freshly built
+ * encoder element for this mount. We keep the ref so dynamic_reconfigure can
+ * change its bitrate live, and apply any override that's already in effect so a
+ * newly (re)connecting client immediately gets the current bitrate. */
+void Image2RTSPNodelet::register_encoder(const std::string& mount, GstElement* enc) {
+    std::lock_guard<std::mutex> lk(mtx);
+    std::map<std::string, GstElement*>::iterator e = encoders.find(mount);
+    if (e != encoders.end() && e->second != NULL)
+        gst_object_unref(e->second);   // drop a stale handle if media rebuilt without unprepare
+    encoders[mount] = enc;             // takes ownership of the gst_bin_get_by_name ref
+    if (enc != NULL && live_bitrate > 0) {
+        g_object_set(G_OBJECT(enc), "bitrate", (guint)live_bitrate, NULL);
+        NODELET_INFO("Stream %s: applied live bitrate %d kbit/s to new media.",
+                     mount.c_str(), live_bitrate);
+    }
+}
+
+/* dynamic_reconfigure callback (also fired once at startup with the defaults).
+ * bitrate == 0 means "leave each stream at its configured bitrate"; any positive
+ * value is pushed to every encoder that currently has prepared media. */
+void Image2RTSPNodelet::reconfigure(ros_rtsp::BitrateConfig& config, uint32_t level) {
+    std::lock_guard<std::mutex> lk(mtx);
+    live_bitrate = config.bitrate;
+    if (live_bitrate <= 0) {
+        NODELET_INFO("Live bitrate override cleared - streams keep their configured bitrate.");
+        return;
+    }
+    int applied = 0;
+    for (std::map<std::string, GstElement*>::iterator it = encoders.begin();
+         it != encoders.end(); ++it) {
+        if (it->second != NULL) {
+            g_object_set(G_OBJECT(it->second), "bitrate", (guint)live_bitrate, NULL);
+            applied++;
+        }
+    }
+    NODELET_INFO("Live bitrate set to %d kbit/s (applied to %d active stream(s)).",
+                 live_bitrate, applied);
 }
 
 void Image2RTSPNodelet::print_info(char *s) {
