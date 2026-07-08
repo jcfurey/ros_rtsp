@@ -450,6 +450,9 @@ void Image2RTSPNodelet::on_media_ready(const std::string& mount, GstRTSPMedia *m
     st.current_media = media;
     st.receiving     = false;
 
+    // Safe under mtx: media-configure fires before the media prepares, so the
+    // encoder isn't running yet and this set can't block on encoder drain
+    // (unlike reconfigure(), which handles live encoders - see there).
     if (st.encoder && live_bitrate > 0) {
         g_object_set(G_OBJECT(st.encoder), "bitrate", (guint)live_bitrate, NULL);
         NODELET_INFO("Stream %s: applied live bitrate %d kbit/s to new media.",
@@ -493,32 +496,50 @@ void Image2RTSPNodelet::on_media_unprepared(const std::string& mount, GstRTSPMed
     NODELET_INFO("Stream %s: RTSP media released; source subscription stopped.", mount.c_str());
 }
 
+/* Executed by GStreamer's helper thread (gst_element_call_async below). */
+static void apply_bitrate_async(GstElement *encoder, gpointer kbps) {
+    g_object_set(G_OBJECT(encoder), "bitrate", (guint)GPOINTER_TO_UINT(kbps), NULL);
+}
+
 /* dynamic_reconfigure callback (also fired once at startup with the defaults).
  * bitrate > 0 overrides every live encoder; bitrate == 0 restores each stream's
- * configured (YAML) bitrate on its live encoder. */
+ * configured (YAML) bitrate on its live encoder.
+ *
+ * The property sets are dispatched with gst_element_call_async, NEVER done
+ * synchronously here: setting "bitrate" on a live x265enc blocks until the
+ * encoder drains, and a pipeline whose TCP client just vanished doesn't drain
+ * until the media is reaped. This callback runs on the nodelet's single-threaded
+ * callback queue - the same queue as imageCallback and the diagnostics/watchdog
+ * timers - so blocking here froze the entire ROS side of the node (observed
+ * live, gdb-confirmed). call_async runs the set on a GStreamer helper thread
+ * (which holds its own ref on the element) and returns immediately. */
 void Image2RTSPNodelet::reconfigure(ros_rtsp::BitrateConfig& config, uint32_t level) {
-    std::lock_guard<std::mutex> lk(mtx);
-    bool clearing = (config.bitrate <= 0) && (live_bitrate > 0);
-    live_bitrate = config.bitrate > 0 ? config.bitrate : 0;
+    int scheduled = 0;
+    {
+        std::lock_guard<std::mutex> lk(mtx);
+        bool clearing = (config.bitrate <= 0) && (live_bitrate > 0);
+        live_bitrate = config.bitrate > 0 ? config.bitrate : 0;
 
-    if (config.bitrate <= 0 && !clearing)
-        return;   // startup default / repeated 0 - nothing to change
+        if (config.bitrate <= 0 && !clearing)
+            return;   // startup default / repeated 0 - nothing to change
 
-    int applied = 0;
-    for (std::map<std::string, StreamState>::iterator it = stream_state.begin();
-         it != stream_state.end(); ++it) {
-        StreamState& st = it->second;
-        if (st.encoder == NULL) continue;
-        int target = live_bitrate > 0 ? live_bitrate : st.config_bitrate;
-        g_object_set(G_OBJECT(st.encoder), "bitrate", (guint)target, NULL);
-        applied++;
+        for (std::map<std::string, StreamState>::iterator it = stream_state.begin();
+             it != stream_state.end(); ++it) {
+            StreamState& st = it->second;
+            if (st.encoder == NULL) continue;
+            guint target = (guint)(live_bitrate > 0 ? live_bitrate : st.config_bitrate);
+            gst_element_call_async(st.encoder, apply_bitrate_async,
+                                   GUINT_TO_POINTER(target), NULL);
+            scheduled++;
+        }
     }
+
     if (live_bitrate > 0)
         NODELET_INFO("Live bitrate set to %d kbit/s (applied to %d active stream(s)).",
-                     live_bitrate, applied);
+                     live_bitrate, scheduled);
     else
         NODELET_INFO("Live bitrate override cleared - restored configured bitrate on %d "
-                     "active stream(s).", applied);
+                     "active stream(s).", scheduled);
 }
 
 void Image2RTSPNodelet::print_info(char *s) {
